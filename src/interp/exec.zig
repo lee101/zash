@@ -93,6 +93,13 @@ pub fn run_top(sh: *Shell, list: ast.List, src: []const u8) Err!u8 {
             error.Abort => {
                 skip_line = item.line;
                 status = sh.status;
+                if (sh.dash_c) {
+                    if (sh.opt(.errexit) and status != 0 and sh.abort_errexit) {
+                        sh.exit_status_pending = status;
+                        return error.Exit;
+                    }
+                    return status;
+                }
                 const ae = sh.abort_errexit;
                 sh.abort_errexit = false;
                 if (sh.opt(.errexit) and status != 0 and ae) {
@@ -103,7 +110,7 @@ pub fn run_top(sh: *Shell, list: ast.List, src: []const u8) Err!u8 {
             },
             else => return e,
         };
-        try check_signals(sh);
+        if (!(sh.dash_c and idx + 1 == list.items.len)) try check_signals(sh);
     }
     return status;
 }
@@ -352,6 +359,16 @@ fn run_multi(sh: *Shell, p: ast.Pipeline) Err!u8 {
             }
             return e;
         };
+        if (last_status != 0 and p.commands[n - 1].body == .simple) {
+            sh.status = last_status;
+            errexit_check(sh, last_status) catch |e| {
+                if (saved_in >= 0) {
+                    _ = sys.dup2(saved_in, 0);
+                    _ = sys.close(saved_in);
+                }
+                return e;
+            };
+        }
         if (saved_in >= 0) {
             _ = sys.dup2(saved_in, 0);
             _ = sys.close(saved_in);
@@ -506,7 +523,7 @@ fn define_function(sh: *Shell, f: ast.Function, c: *const ast.Command) Err!u8 {
             return 1;
         }
         old.body = f.body;
-        old.file = sh.cur_file;
+        old.file = if (sh.dash_c and std.mem.eql(u8, sh.cur_file, sh.script_name)) "environment" else sh.cur_file;
         old.line = c.line;
         sh.func_gen +%= 1;
         return 0;
@@ -514,7 +531,8 @@ fn define_function(sh: *Shell, f: ast.Function, c: *const ast.Command) Err!u8 {
     const fn_ = try sh.gpa.create(shell.Func);
     errdefer sh.gpa.destroy(fn_);
     const name = try sh.gpa.dupe(u8, f.name);
-    fn_.* = .{ .name = name, .body = f.body, .file = sh.cur_file, .line = c.line };
+    fn_.* = .{ .name = name, .body = f.body, .file = if (sh.dash_c and std.mem.eql(u8, sh.cur_file, sh.script_name)) "environment" else sh.cur_file, .line = c.line, .exported = sh.opt(.allexport) };
+    if (fn_.exported) sh.mark_env();
     try sh.funcs.put(sh.gpa, name, fn_);
     sh.func_gen +%= 1;
     return 0;
@@ -1461,6 +1479,9 @@ pub fn call_function(sh: *Shell, f: *const shell.Func, args: []const []const u8)
     if (!sh.opt(.errtrace)) sh.trap_err = .{};
     var status: u8 = 0;
     var ret_err: ?Err = null;
+    if (sh.trap_debug.kind == .cmd and !sh.trap_debug.inherited and !sh.in_debug_trap) {
+        if (sh.cur_cmd) |cc| run_debug_trap(sh, cc) catch {};
+    }
     status = run_command(sh, f.body, false) catch |e| blk: {
         switch (e) {
             error.Return => break :blk sh.status,

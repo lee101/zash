@@ -2425,11 +2425,26 @@ fn bi_enable(sh: *Shell, argv: []const []const u8) Err!u8 {
 }
 
 fn bi_caller(sh: *Shell, argv: []const []const u8) Err!u8 {
-        if (sh.frames.items.len == 0) return 1;
-    const fr = sh.frames.items[sh.frames.items.len - 1];
+    var e: usize = 0;
     if (argv.len > 1) {
-        _ = sh.outf("{d} {s} {s}\n", .{ fr.call_line, if (sh.frames.items.len > 1) sh.frames.items[sh.frames.items.len - 2].func.name else "main", fr.call_file });
-    } else _ = sh.outf("{d} {s}\n", .{ fr.call_line, fr.call_file });
+        e = std.fmt.parseInt(usize, argv[1], 10) catch {
+            sh.bmsg("caller", "{s}: invalid number", .{argv[1]});
+            sh.usage_msg("caller", "caller [expr]");
+            return 2;
+        };
+    }
+    const lines = (try expand.virtual_array(sh, "BASH_LINENO")).?;
+    const srcs = (try expand.virtual_array(sh, "BASH_SOURCE")).?;
+    if (argv.len <= 1) {
+        if (lines.len == 0) return 1;
+        const f: []const u8 = if (srcs.len > 1) srcs[1] else "NULL";
+        _ = sh.outf("{s} {s}\n", .{ lines[0], f });
+        return 0;
+    }
+    const funcs = (try expand.virtual_array(sh, "FUNCNAME")) orelse return 1;
+    if (e + 1 >= funcs.len or e >= lines.len) return 1;
+    const f: []const u8 = if (e + 1 < srcs.len) srcs[e + 1] else "NULL";
+    _ = sh.outf("{s} {s} {s}\n", .{ lines[e], funcs[e + 1], f });
     return 0;
 }
 

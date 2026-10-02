@@ -129,7 +129,6 @@ fn bracket_match(p: []const u8, open: usize, close: usize, c: u8, nocase: bool) 
                 const name = p[i + 2 .. j];
                 if (d == ':') {
                     if (class_match(name, c)) matched = true;
-                    if (nocase and (class_match(name, lower(c)) or class_match(name, std.ascii.toUpper(c)))) matched = true;
                 } else if (name.len == 1 and name[0] == c) matched = true;
                 i = j + 2;
                 continue;

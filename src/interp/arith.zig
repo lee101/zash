@@ -149,7 +149,7 @@ const Eval = struct {
         if (std.mem.eql(u8, v.name, "RANDOM") or std.mem.eql(u8, v.name, "LINENO")) return null;
         if (sh.opt(.nounset) and v.name.len > 0) {
             sh.msg("{s}: unbound variable", .{v.name});
-            sh.status = if (sh.dash_c) 127 else 1;
+            sh.status = sh.fatal_status();
             return error.Exit;
         }
         return null;

@@ -567,7 +567,7 @@ fn special_value(sh: *Shell, name: []const u8) Err!Val {
     }
 }
 
-fn virtual_array(sh: *Shell, name: []const u8) Err!?[]const []const u8 {
+pub fn virtual_array(sh: *Shell, name: []const u8) Err!?[]const []const u8 {
     const a = sh.sa;
     if (std.mem.eql(u8, name, "FUNCNAME")) {
         if (sh.frames.items.len == 0) return null;
@@ -577,7 +577,7 @@ fn virtual_array(sh: *Shell, name: []const u8) Err!?[]const []const u8 {
             i -= 1;
             try l.append(a, sh.frames.items[i].func.name);
         }
-        try l.append(a, "main");
+        if (!sh.dash_c) try l.append(a, "main");
         return l.items;
     }
     if (std.mem.eql(u8, name, "BASH_SOURCE")) {
@@ -587,7 +587,7 @@ fn virtual_array(sh: *Shell, name: []const u8) Err!?[]const []const u8 {
             i -= 1;
             try l.append(a, sh.frames.items[i].func.file);
         }
-        try l.append(a, sh.script_name);
+        if (!sh.dash_c) try l.append(a, sh.script_name);
         return l.items;
     }
     if (std.mem.eql(u8, name, "BASH_LINENO")) {
@@ -597,7 +597,7 @@ fn virtual_array(sh: *Shell, name: []const u8) Err!?[]const []const u8 {
             i -= 1;
             try l.append(a, try sh.tmp_fmt("{d}", .{sh.frames.items[i].call_line}));
         }
-        try l.append(a, "0");
+        if (!sh.dash_c) try l.append(a, "0");
         return l.items;
     }
     if (std.mem.eql(u8, name, "PIPESTATUS")) {
@@ -761,7 +761,7 @@ fn unbound_check_sub(sh: *Shell, name: []const u8, sub: ?ast.Subscript, is_set: 
             .index => |w| {
                 const src = try unparse.word_source(sh, w);
                 sh.msg("{s}[{s}]: unbound variable", .{ name, src });
-                sh.status = if (sh.dash_c) 127 else 1;
+                sh.status = sh.fatal_status();
                 sh.fatal_expand = true;
                 return error.Exit;
             },
@@ -770,12 +770,12 @@ fn unbound_check_sub(sh: *Shell, name: []const u8, sub: ?ast.Subscript, is_set: 
     }
     if (is_special_name(name) and name[0] != '_') {
         sh.msg("${s}: unbound variable", .{name});
-        sh.status = if (sh.dash_c) 127 else 1;
+        sh.status = sh.fatal_status();
         sh.fatal_expand = true;
         return error.Exit;
     }
     sh.msg("{s}: unbound variable", .{name});
-    sh.status = if (sh.dash_c) 127 else 1;
+    sh.status = sh.fatal_status();
     sh.fatal_expand = true;
     return error.Exit;
 }
@@ -982,7 +982,7 @@ fn param(b: *B, pe: *const ast.ParamExp, quoted: bool) Err!void {
                     if (cw.word.parts.len == 0) {
                         sh.msg("{s}: {s}", .{ name, if (cw.colon) "parameter null or not set" else "parameter not set" });
                     } else sh.msg("{s}: {s}", .{ name, m });
-                    sh.status = if (sh.dash_c) 127 else 1;
+                    sh.status = sh.fatal_status();
                     sh.fatal_expand = true;
                     return error.Exit;
                 },

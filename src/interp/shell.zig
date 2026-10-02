@@ -369,6 +369,10 @@ pub const Shell = struct {
         _ = sys.write_all(2, w.items);
     }
 
+    pub fn fatal_status(self: *const Shell) u8 {
+        return if (self.dash_c and self.subshell_level == 0) 127 else 1;
+    }
+
     pub fn has_func_frame(self: *const Shell) bool {
         for (self.frames.items) |f| if (!f.is_source) return true;
         return false;
