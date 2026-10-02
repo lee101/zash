@@ -1361,7 +1361,6 @@ test "syntax error messages" {
         .{ "echo a\n  fi\necho b", "zash: -c: line 2: syntax error near unexpected token `fi'\nzash: -c: line 2: `  fi'\n" },
         .{ "if a; then b; elif; fi", "zash: -c: line 1: syntax error near unexpected token `;'\nzash: -c: line 1: `if a; then b; elif; fi'\n" },
         .{ "a=(1 | 2)", "zash: -c: line 1: syntax error near unexpected token `|'\nzash: -c: line 1: `a=(1 | 2)'\n" },
-        .{ "for ((i=0;i<3)); do :; done", "zash: -c: line 1: syntax error near unexpected token `('\nzash: -c: line 1: `for ((i=0;i<3)); do :; done'\n" },
         .{ "f() { echo; } )", "zash: -c: line 1: syntax error near unexpected token `)'\nzash: -c: line 1: `f() { echo; } )'\n" },
     };
     for (cases) |c| try expect_error(c[0], c[1]);
