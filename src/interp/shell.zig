@@ -271,7 +271,7 @@ pub const Shell = struct {
         sh.opts[@intFromEnum(Opt.braceexpand)] = true;
         sh.opts[@intFromEnum(Opt.hashall)] = true;
         sh.opts[@intFromEnum(Opt.interactive_comments)] = true;
-        inline for ([_]Shopt{ .checkwinsize, .cmdhist, .complete_fullquote, .extquote, .force_fignore, .globasciiranges, .hostcomplete, .interactive_comments, .progcomp, .promptvars, .sourcepath, .extglob }) |s| {
+        inline for ([_]Shopt{ .checkwinsize, .cmdhist, .complete_fullquote, .extquote, .force_fignore, .globasciiranges, .hostcomplete, .interactive_comments, .progcomp, .promptvars, .sourcepath }) |s| {
             sh.shopts[@intFromEnum(s)] = true;
         }
         return sh;
@@ -393,7 +393,7 @@ pub const Shell = struct {
     }
 
     pub fn usage_msg(self: *Shell, name: []const u8, text: []const u8) void {
-        self.bmsg(name, "usage: {s}", .{text});
+        self.msg_raw("{s}: usage: {s}\n", .{ name, text });
     }
 
     pub fn mark_env(self: *Shell) void {
@@ -865,7 +865,7 @@ pub const Shell = struct {
     }
 
     pub fn env_block_get(self: *Shell) Err!*EnvBlock {
-        if (self.env_built_gen == self.env_gen and self.env_block.ptrs.items.len > 0) return &self.env_block;
+        if (self.env_built_gen == self.env_gen and self.env_funcs_gen == self.func_gen and self.env_block.ptrs.items.len > 0) return &self.env_block;
         const a = self.gpa;
         for (self.env_block.strings.items) |s| a.free(s);
         self.env_block.strings.clearRetainingCapacity();
@@ -887,9 +887,48 @@ pub const Shell = struct {
                 return error.OutOfMemory;
             };
         }
+        var fit = self.funcs.iterator();
+        while (fit.next()) |fe| {
+            const f = fe.value_ptr.*;
+            if (!f.exported) continue;
+            const m = self.scratch.mark();
+            defer self.scratch.release(m);
+            const un = @import("unparse.zig");
+            var wr: un.W = .{ .sh = self, .a = self.sa };
+            try wr.put("() ");
+            if (f.body.body == .group) wr.command(f.body) catch continue else {
+                try wr.put("{ ");
+                wr.command(f.body) catch continue;
+                try wr.put("; }");
+            }
+            const body: []const u8 = wr.out.items;
+            const key_len = "BASH_FUNC_".len + f.name.len + 2;
+            const z = try a.allocSentinel(u8, key_len + 1 + body.len, 0);
+            @memcpy(z[0.."BASH_FUNC_".len], "BASH_FUNC_");
+            @memcpy(z["BASH_FUNC_".len..][0..f.name.len], f.name);
+            z[key_len - 2] = '%';
+            z[key_len - 1] = '%';
+            z[key_len] = '=';
+            @memcpy(z[key_len + 1 ..], body);
+            self.env_block.strings.append(a, z) catch {
+                a.free(z);
+                return error.OutOfMemory;
+            };
+        }
+        var pit = self.pending_funcs.iterator();
+        while (pit.next()) |pe| {
+            if (self.funcs.contains(pe.key_ptr.*)) continue;
+            const z = try a.allocSentinel(u8, "BASH_FUNC_".len + pe.key_ptr.len + 3 + pe.value_ptr.len, 0);
+            _ = std.fmt.bufPrint(z, "BASH_FUNC_{s}%%={s}", .{ pe.key_ptr.*, pe.value_ptr.* }) catch {};
+            self.env_block.strings.append(a, z) catch {
+                a.free(z);
+                return error.OutOfMemory;
+            };
+        }
         for (self.env_block.strings.items) |s| try self.env_block.ptrs.append(a, s.ptr);
         try self.env_block.ptrs.append(a, null);
         self.env_built_gen = self.env_gen;
+        self.env_funcs_gen = self.func_gen;
         return &self.env_block;
     }
 

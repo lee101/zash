@@ -58,6 +58,13 @@ pub fn setup(sh: *Shell, environ: []const ?[*:0]const u8, script_name: []const u
         const eq = std.mem.findScalar(u8, s, '=') orelse continue;
         const name = s[0..eq];
         const value = s[eq + 1 ..];
+        if (std.mem.startsWith(u8, name, "BASH_FUNC_") and std.mem.endsWith(u8, name, "%%") and name.len > 12) {
+            const fname = name["BASH_FUNC_".len .. name.len - 2];
+            if (std.mem.startsWith(u8, value, "()")) {
+                try sh.pending_funcs.put(gpa, try gpa.dupe(u8, fname), try gpa.dupe(u8, value));
+            }
+            continue;
+        }
         if (!shell.Shell.is_valid_name(name)) continue;
         if (std.mem.eql(u8, name, "IFS") or std.mem.eql(u8, name, "SHELLOPTS") or std.mem.eql(u8, name, "BASHOPTS") or std.mem.eql(u8, name, "UID") or std.mem.eql(u8, name, "EUID") or std.mem.eql(u8, name, "PPID")) continue;
         if (std.mem.eql(u8, name, "LC_ALL")) lc_all = value;

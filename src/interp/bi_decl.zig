@@ -369,6 +369,7 @@ fn run_funcs(sh: *Shell, kind: Kind, fl: Flags, rest: []const exec.DeclItem) Err
                 continue;
             };
             f.exported = fl.x.?;
+            sh.mark_env();
             continue;
         }
         if (kind == .readonly) {
@@ -384,7 +385,10 @@ fn run_funcs(sh: *Shell, kind: Kind, fl: Flags, rest: []const exec.DeclItem) Err
                 try out.print(sh.sa, "{s}\n", .{nm});
             }
         } else try function_text(sh, f, &out);
-        if (fl.x == true and !fl.F) f.exported = true;
+        if (fl.x == true and !fl.F) {
+            f.exported = true;
+            sh.mark_env();
+        }
     }
     _ = sh.out(out.items);
     return status;

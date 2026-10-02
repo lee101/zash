@@ -381,7 +381,7 @@ pub fn wait_pid(sh: *Shell, pid: c_int) u8 {
 
 pub fn wait_report(sh: *Shell, pid: c_int) u8 {
     const st = wait_raw(sh, pid) orelse return 127;
-    if (sys.wifsignaled(st)) {
+    if (sys.wifsignaled(st) and sh.cmdsub_depth == 0) {
         const sig = sys.wtermsig(st);
         if (sig != sys.SIGINT and sig != sys.SIGPIPE) {
             var buf: [128]u8 = undefined;
@@ -596,7 +596,7 @@ fn run_for(sh: *Shell, f: ast.ForIn) Err!u8 {
     var status: u8 = 0;
     for (items.items) |it| {
         sh.lineno = sh.lineno;
-        if (sh.opt(.xtrace)) try trace_text(sh, "for {s} in", f.name, if (f.words) |ws| ws else &.{});
+        if (sh.opt(.xtrace)) try trace_for(sh, "for", f.name, items.items);
         try sh.assign_scalar(f.name, it, false);
         const b = try catch_loop(sh, run_list(sh, f.body));
         status = b.st;
@@ -605,13 +605,16 @@ fn run_for(sh: *Shell, f: ast.ForIn) Err!u8 {
     return status;
 }
 
-fn trace_text(sh: *Shell, comptime fmt: []const u8, name: []const u8, words: []const ast.Word) Err!void {
-    _ = words;
+fn trace_for(sh: *Shell, kw: []const u8, name: []const u8, items: []const []const u8) Err!void {
     const m = sh.scratch.mark();
     defer sh.scratch.release(m);
     var w: std.ArrayList(u8) = .empty;
     try ps4(sh, &w);
-    try w.print(sh.sa, fmt, .{name});
+    try w.print(sh.sa, "{s} {s} in", .{ kw, name });
+    for (items) |it| {
+        try w.append(sh.sa, ' ');
+        try strutil.quote_xtrace(sh.sa, &w, it);
+    }
     try w.append(sh.sa, '\n');
     _ = sys.write_all(2, w.items);
 }
@@ -971,10 +974,21 @@ fn make_decl_assign(sh: *Shell, w: ast.Word) Err!?ast.Assign {
     return .{ .name = sp.name, .index = idx_word, .append = sp.append, .value = value };
 }
 
+fn trace_assign(sh: *Shell, name: []const u8, val: []const u8, append: bool) Err!void {
+    var w: std.ArrayList(u8) = .empty;
+    try ps4(sh, &w);
+    try w.appendSlice(sh.sa, name);
+    try w.appendSlice(sh.sa, if (append) "+=" else "=");
+    try strutil.quote_xtrace(sh.sa, &w, val);
+    try w.append(sh.sa, '\n');
+    _ = sys.write_all(2, w.items);
+}
+
 pub fn do_assign(sh: *Shell, a: ast.Assign) Err!void {
     switch (a.value) {
         .scalar => |w| {
             const val = try expand.word_string(sh, w);
+            if (sh.opt(.xtrace)) try trace_assign(sh, a.name, val, a.append);
             if (a.index) |ix| {
                 const v = sh.find(a.name) orelse try sh.new_var(a.name);
                 if (v.flags.readonly) return sh.readonly_err(v.name);
@@ -1072,16 +1086,6 @@ fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final: bool) Err
     if (sh.trap_debug.kind == .cmd and !sh.trap_debug.inherited and !sh.in_debug_trap) try run_debug_trap(sh, c);
 
     if (argv.items.len == 0) {
-        var avals: std.ArrayList([]const u8) = .empty;
-        if (sh.opt(.xtrace) and s.assigns.len > 0) {
-            for (s.assigns) |a| {
-                switch (a.value) {
-                    .scalar => |w| try avals.append(sh.sa, try expand.word_string(sh, w)),
-                    .array => try avals.append(sh.sa, "(...)"),
-                }
-            }
-            try xtrace_simple(sh, s, &.{}, avals.items);
-        }
         var scope: redir.Scope = .{};
         defer scope.restore(sh);
         for (s.assigns) |a| {
@@ -1146,6 +1150,7 @@ pub fn dispatch(sh: *Shell, argv: []const []const u8, decl: []const DeclItem, de
 pub fn dispatch_ex(sh: *Shell, argv: []const []const u8, decl: []const DeclItem, decl_mode: bool, redirs: []const ast.Redirect, final: bool, d: Dispatch) Err!u8 {
     const name = argv[0];
     if (!d.skip_funcs and !d.builtin_only) {
+        if (sh.pending_funcs.count() > 0 and !sh.funcs.contains(name)) try import_function(sh, name);
         if (sh.funcs.get(name)) |f| {
             var scope: redir.Scope = .{};
             defer scope.restore(sh);
@@ -1177,6 +1182,14 @@ fn util_ok(sh: *Shell, name: []const u8) bool {
         if (sys.lseek(0, 0, 1) >= 0) return false;
     }
     return true;
+}
+
+fn import_function(sh: *Shell, name: []const u8) Err!void {
+    const kv = sh.pending_funcs.fetchRemove(name) orelse return;
+    const text = try std.mem.concat(sh.sa, u8, &.{ name, " ", kv.value });
+    sh.gpa.free(kv.key);
+    sh.gpa.free(kv.value);
+    _ = try run_string(sh, text, .{ .label = "", .line_base = 0 });
 }
 
 pub fn call_function(sh: *Shell, f: *const shell.Func, args: []const []const u8) Err!u8 {

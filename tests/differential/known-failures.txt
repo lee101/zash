@@ -1,2 +1,11 @@
 # Cases expected to fail against zash: one id (category/name) or glob per line, # for comments.
 # Regenerate: tests/differential/run.sh --update-known-failures
+builtin-eval/line-numbers
+command-subst/read-file
+errors/syntax-array-literal
+errors/syntax-in-cmdsubst
+errors/syntax-unexpected-eof-heredoc
+heredoc/eof-unterminated
+jobs/coproc
+set-options/x-arith
+special-vars/status-signal

@@ -836,7 +836,7 @@ fn bi_source(sh: *Shell, argv: []const []const u8) Err!u8 {
         }
     }
     const content = exec.read_whole_file(sh, path) orelse {
-        sh.bmsg(argv[0], "{s}: {s}", .{ name, if (sys.errno() == sys.ENOENT or sys.errno() == 0) "No such file or directory" else sys.msg_for(sys.errno()) });
+        sh.msg("{s}: {s}", .{ name, if (sys.errno() == sys.ENOENT or sys.errno() == 0) "No such file or directory" else sys.msg_for(sys.errno()) });
         return 1;
     };
     const saved_pos = sh.pos;

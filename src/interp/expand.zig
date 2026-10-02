@@ -123,7 +123,7 @@ const B = struct {
 
     fn push_field(self: *B, text: []const u8) Err!void {
         const a = self.a;
-        if (self.glob_on and has_unescaped_meta(text, self.sh.shopt(.extglob))) {
+        if (self.glob_on and has_unescaped_meta(text, true)) {
             const pat = try to_pattern(a, text);
             var matches: std.ArrayList([]const u8) = .empty;
             try glob.expand(self.sh, pat, &matches);
@@ -295,7 +295,7 @@ pub fn word_fields(sh: *Shell, w: ast.Word, out: *std.ArrayList([]const u8)) Err
     if (w.parts.len == 1) {
         switch (w.parts[0]) {
             .lit => |t| {
-                if (!sh.opt(.noglob) and has_unescaped_meta(t, sh.shopt(.extglob))) {} else {
+                if (!sh.opt(.noglob) and has_unescaped_meta(t, true)) {} else {
                     try out.append(sh.sa, t);
                     return;
                 }
@@ -734,8 +734,30 @@ fn variable(b: *B, name: []const u8, quoted: bool) Err!void {
 }
 
 fn unbound_check(sh: *Shell, name: []const u8, is_set: bool) Err!void {
+    return unbound_check_sub(sh, name, null, is_set);
+}
+
+fn unbound_check_sub(sh: *Shell, name: []const u8, sub: ?ast.Subscript, is_set: bool) Err!void {
     if (is_set or !sh.opt(.nounset)) return;
     if (name.len == 1 and (name[0] == '@' or name[0] == '*')) return;
+    if (sub) |s| {
+        switch (s) {
+            .index => |w| {
+                const src = try unparse.word_source(sh, w);
+                sh.msg("{s}[{s}]: unbound variable", .{ name, src });
+                sh.status = if (sh.dash_c) 127 else 1;
+                sh.fatal_expand = true;
+                return error.Exit;
+            },
+            else => {},
+        }
+    }
+    if (is_special_name(name) and name[0] != '_') {
+        sh.msg("${s}: unbound variable", .{name});
+        sh.status = if (sh.dash_c) 127 else 1;
+        sh.fatal_expand = true;
+        return error.Exit;
+    }
     sh.msg("{s}: unbound variable", .{name});
     sh.status = if (sh.dash_c) 127 else 1;
     sh.fatal_expand = true;
@@ -882,8 +904,7 @@ fn param(b: *B, pe: *const ast.ParamExp, quoted: bool) Err!void {
 
     switch (pe.op) {
         .none => {
-            if (!base.set and base.list == null) try unbound_check(sh, name, false);
-            if (base.list != null and !base.set and sub == null and !is_special_name(name)) {}
+            if (!base.set and base.list == null) try unbound_check_sub(sh, name, sub, false);
             return emit_val(b, base, quoted);
         },
         .use_default, .assign_default, .error_unset, .use_alt => {
@@ -948,7 +969,7 @@ fn param(b: *B, pe: *const ast.ParamExp, quoted: bool) Err!void {
     }
 
     if (!base.set and base.list == null) {
-        try unbound_check(sh, name, false);
+        try unbound_check_sub(sh, name, sub, false);
     }
     if (base.list == null and !base.set) {
         switch (pe.op) {

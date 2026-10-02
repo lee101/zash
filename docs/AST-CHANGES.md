@@ -9,3 +9,4 @@ Additive requests only. The interpreter works without them, each one closes a re
 - Syntax error inside `$( ... )` should report `PREFIX: command substitution: line N: syntax error near unexpected token `)'` plus the quoted source line, instead of `bad substitution`. Case: errors/syntax-in-cmdsubst.
 - `Command.line` for a simple command whose words span several lines is the line of the last token in bash (LINENO and eval line numbers). Case: builtin-eval/line-numbers.
 - Arithmetic parse errors at end of input: the error token is the last operator token (`1+` reports token `+`), currently empty.
+- Lexer: `{CP[1]}>&-` and `{arr[0]}>file` (named fd redirection with an array element) must lex as `io_var` with name `CP[1]`. Case: jobs/coproc.
