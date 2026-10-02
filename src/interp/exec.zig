@@ -160,6 +160,7 @@ fn run_pipeline(sh: *Shell, p: ast.Pipeline) Err!u8 {
     if (p.commands.len == 1) {
         const c = &p.commands[0];
         status = try run_command(sh, c, false);
+        if (sh.pending_sig != 0) flush_sig_report(sh);
         switch (c.body) {
             .simple, .subshell, .arith_cmd, .cond => {
                 const one = [_]u8{status};
@@ -383,13 +384,18 @@ pub fn wait_report(sh: *Shell, pid: c_int) u8 {
     const st = wait_raw(sh, pid) orelse return 127;
     if (sys.wifsignaled(st) and sh.cmdsub_depth == 0) {
         const sig = sys.wtermsig(st);
-        if (sig != sys.SIGINT and sig != sys.SIGPIPE) {
-            var buf: [128]u8 = undefined;
-            const txt = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ std.mem.span(sys.strsignal(sig)), if (st & 0x80 != 0) " (core dumped)" else "" }) catch "";
-            _ = sys.write_all(2, txt);
-        }
+        if (sig != sys.SIGINT and sig != sys.SIGPIPE) sh.pending_sig = st;
     }
     return sys.status_code(st);
+}
+
+fn flush_sig_report(sh: *Shell) void {
+    const st = sh.pending_sig;
+    if (st == 0) return;
+    sh.pending_sig = 0;
+    var buf: [128]u8 = undefined;
+    const txt = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ std.mem.span(sys.strsignal(sys.wtermsig(st))), if (st & 0x80 != 0) " (core dumped)" else "" }) catch "";
+    _ = sys.write_all(2, txt);
 }
 
 pub fn enter_child(sh: *Shell) void {
@@ -663,27 +669,44 @@ fn run_select(sh: *Shell, f: ast.ForIn) Err!u8 {
         if (show) {
             var out: std.ArrayList(u8) = .empty;
             const cols_s = sh.get_scalar("COLUMNS");
-            const cols: usize = if (cols_s) |c| std.fmt.parseInt(usize, c, 10) catch 80 else 80;
-            var maxw: usize = 0;
-            for (items.items) |it| maxw = @max(maxw, it.len);
-            const nd = digits_of(items.items.len);
-            const colw = maxw + nd + 2 + 1;
-            var ncols = @max(1, cols / colw);
-            if (ncols > items.items.len) ncols = items.items.len;
-            const rows = (items.items.len + ncols - 1) / ncols;
-            var r: usize = 0;
-            while (r < rows) : (r += 1) {
-                var c: usize = 0;
-                while (c < ncols) : (c += 1) {
-                    const idx = r + c * rows;
-                    if (idx >= items.items.len) break;
-                    const num = try sh.tmp_fmt("{d}) {s}", .{ idx + 1, items.items[idx] });
+            const term_cols: usize = if (cols_s) |c| std.fmt.parseInt(usize, c, 10) catch 80 else 80;
+            var max_elem: usize = 0;
+            for (items.items) |it| max_elem = @max(max_elem, strutil.char_len(sh.utf8, it));
+            const list_len = items.items.len;
+            const indices_len = digits_of(list_len);
+            max_elem += indices_len + 2 + 2;
+            var cols: usize = if (max_elem > 0) term_cols / max_elem else 1;
+            if (cols == 0) cols = 1;
+            var rows: usize = list_len / cols + @intFromBool(list_len % cols != 0);
+            cols = list_len / rows + @intFromBool(list_len % rows != 0);
+            if (rows == 1) {
+                rows = cols;
+                cols = 1;
+            }
+            const first_indices_len = digits_of(rows);
+            var row: usize = 0;
+            while (row < rows) : (row += 1) {
+                var ind = row;
+                var pos: usize = 0;
+                while (true) {
+                    const il: usize = if (pos == 0) first_indices_len else indices_len;
+                    const num = try std.fmt.allocPrint(sh.sa, "{d: >[2]}) {s}", .{ ind + 1, items.items[ind], il });
                     try out.appendSlice(sh.sa, num);
-                    const last_col = c + 1 == ncols or r + (c + 1) * rows >= items.items.len;
-                    if (!last_col) {
-                        var pad = colw -| num.len;
-                        while (pad > 0) : (pad -= 1) try out.append(sh.sa, ' ');
+                    const elem_len = strutil.char_len(sh.utf8, items.items[ind]) + il + 2;
+                    ind += rows;
+                    if (ind >= list_len) break;
+                    var from = pos + elem_len;
+                    const to = pos + max_elem;
+                    while (from < to) {
+                        if (to / 8 > from / 8) {
+                            try out.append(sh.sa, '\t');
+                            from += 8 - (from % 8);
+                        } else {
+                            try out.append(sh.sa, ' ');
+                            from += 1;
+                        }
                     }
+                    pos += max_elem;
                 }
                 try out.append(sh.sa, '\n');
             }
@@ -901,6 +924,9 @@ fn alias_text(sh: *Shell, c: *const ast.Command, s: ast.Simple) Err!?[]const u8 
     };
     const first = plain_lit(s.words[0]) orelse return null;
     var value = sh.aliases.get(first) orelse return null;
+    if (sh.alias_lines.get(first)) |dl| {
+        if (c.line <= dl) return null;
+    }
     var w: unparse.W = .{ .sh = sh, .a = sh.sa };
     if (s.assigns.len > 0) {
         try w.simple(.{ .assigns = s.assigns, .words = &.{} });
@@ -911,6 +937,9 @@ fn alias_text(sh: *Shell, c: *const ast.Command, s: ast.Simple) Err!?[]const u8 
     while (value.len > 0 and (value[value.len - 1] == ' ' or value[value.len - 1] == '\t') and wi < s.words.len) {
         const nxt = plain_lit(s.words[wi]) orelse break;
         const v2 = sh.aliases.get(nxt) orelse break;
+        if (sh.alias_lines.get(nxt)) |dl| {
+            if (c.line <= dl) break;
+        }
         try w.put(v2);
         value = v2;
         wi += 1;
@@ -1088,15 +1117,7 @@ fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final: bool) Err
     if (argv.items.len == 0) {
         var scope: redir.Scope = .{};
         defer scope.restore(sh);
-        for (s.assigns) |a| {
-            do_assign(sh, a) catch |e| switch (e) {
-                error.Abort => {
-                    sh.status = 1;
-                    return 1;
-                },
-                else => return e,
-            };
-        }
+        for (s.assigns) |a| try do_assign(sh, a);
         if (c.redirs.len > 0) {
             if (!try redir.apply(sh, c.redirs, &scope)) return 1;
         }
@@ -1118,10 +1139,7 @@ fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final: bool) Err
                 try avals.append(sh.sa, val);
                 if (a.index != null) continue;
                 sh.push_temp(a.name, val) catch |e| switch (e) {
-                    error.Abort => {
-                        sh.status = 1;
-                        return 1;
-                    },
+                    error.Abort => {},
                     else => return e,
                 };
             },

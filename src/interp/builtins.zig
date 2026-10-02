@@ -1016,6 +1016,17 @@ fn bi_command(sh: *Shell, argv: []const []const u8) Err!u8 {
         }
     }
     if (i >= argv.len) return 0;
+    var saved_path: ?[]u8 = null;
+    if (use_default_path) {
+        if (sh.get_scalar("PATH")) |p| saved_path = try sh.gpa.dupe(u8, p);
+        try sh.assign_scalar("PATH", "/bin:/usr/bin", false);
+    }
+    defer if (use_default_path) {
+        if (saved_path) |p| {
+            sh.assign_scalar("PATH", p, false) catch {};
+            sh.gpa.free(p);
+        } else _ = sh.unset_var("PATH") catch false;
+    };
     if (mode_v or mode_vv) {
         var status: u8 = 0;
         for (argv[i..]) |n| {
@@ -1026,17 +1037,6 @@ fn bi_command(sh: *Shell, argv: []const []const u8) Err!u8 {
         }
         return status;
     }
-    var saved_path: ?[]u8 = null;
-    if (use_default_path) {
-        if (sh.get_scalar("PATH")) |p| saved_path = try sh.gpa.dupe(u8, p);
-        try sh.assign_scalar("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", false);
-    }
-    defer if (use_default_path) {
-        if (saved_path) |p| {
-            sh.assign_scalar("PATH", p, false) catch {};
-            sh.gpa.free(p);
-        } else _ = sh.unset_var("PATH") catch false;
-    };
     return exec.dispatch_ex(sh, argv[i..], &.{}, false, &.{}, false, .{ .skip_funcs = true });
 }
 
@@ -1360,6 +1360,8 @@ fn bi_alias(sh: *Shell, argv: []const []const u8) Err!u8 {
                 sh.gpa.free(old.value);
             }
             sh.alias_gen +%= 1;
+            const lk = try sh.gpa.dupe(u8, n);
+            if (try sh.alias_lines.fetchPut(sh.gpa, lk, sh.lineno)) |old| sh.gpa.free(old.key);
         } else {
             if (sh.aliases.get(arg)) |v| {
                 try out.print(sh.sa, "alias {s}=", .{arg});
@@ -1398,6 +1400,7 @@ fn bi_unalias(sh: *Shell, argv: []const []const u8) Err!u8 {
             sh.gpa.free(e.value_ptr.*);
         }
         sh.aliases.clearRetainingCapacity();
+        sh.alias_lines.clearRetainingCapacity();
         sh.alias_gen +%= 1;
         return 0;
     }
@@ -1408,6 +1411,7 @@ fn bi_unalias(sh: *Shell, argv: []const []const u8) Err!u8 {
     var status: u8 = 0;
     for (argv[i..]) |n| {
         if (sh.aliases.fetchRemove(n)) |kv| {
+            if (sh.alias_lines.fetchRemove(n)) |lk| sh.gpa.free(lk.key);
             sh.gpa.free(kv.key);
             sh.gpa.free(kv.value);
             sh.alias_gen +%= 1;
@@ -1951,24 +1955,34 @@ fn perm_str(p: c_uint) []const u8 {
     };
 }
 
-const Limit = struct { flag: u8, res: c_int, desc: []const u8, scale: u64 };
+const Limit = struct { flag: u8, res: c_int, desc: []const u8, unit: []const u8, scale: u64 };
 const limits = [_]Limit{
-    .{ .flag = 'c', .res = 4, .desc = "core file size", .scale = 512 },
-    .{ .flag = 'd', .res = 2, .desc = "data seg size", .scale = 1024 },
-    .{ .flag = 'e', .res = 13, .desc = "scheduling priority", .scale = 1 },
-    .{ .flag = 'f', .res = 1, .desc = "file size", .scale = 512 },
-    .{ .flag = 'i', .res = 11, .desc = "pending signals", .scale = 1 },
-    .{ .flag = 'l', .res = 8, .desc = "max locked memory", .scale = 1024 },
-    .{ .flag = 'm', .res = 5, .desc = "max memory size", .scale = 1024 },
-    .{ .flag = 'n', .res = 7, .desc = "open files", .scale = 1 },
-    .{ .flag = 'q', .res = 12, .desc = "POSIX message queues", .scale = 1 },
-    .{ .flag = 'r', .res = 14, .desc = "real-time priority", .scale = 1 },
-    .{ .flag = 's', .res = 3, .desc = "stack size", .scale = 1024 },
-    .{ .flag = 't', .res = 0, .desc = "cpu time", .scale = 1 },
-    .{ .flag = 'u', .res = 6, .desc = "max user processes", .scale = 1 },
-    .{ .flag = 'v', .res = 9, .desc = "virtual memory", .scale = 1024 },
-    .{ .flag = 'x', .res = 10, .desc = "file locks", .scale = 1 },
+    .{ .flag = 'R', .res = 15, .desc = "real-time non-blocking time", .unit = "microseconds", .scale = 1 },
+    .{ .flag = 'c', .res = 4, .desc = "core file size", .unit = "blocks", .scale = 512 },
+    .{ .flag = 'd', .res = 2, .desc = "data seg size", .unit = "kbytes", .scale = 1024 },
+    .{ .flag = 'e', .res = 13, .desc = "scheduling priority", .unit = "", .scale = 1 },
+    .{ .flag = 'f', .res = 1, .desc = "file size", .unit = "blocks", .scale = 512 },
+    .{ .flag = 'i', .res = 11, .desc = "pending signals", .unit = "", .scale = 1 },
+    .{ .flag = 'l', .res = 8, .desc = "max locked memory", .unit = "kbytes", .scale = 1024 },
+    .{ .flag = 'm', .res = 5, .desc = "max memory size", .unit = "kbytes", .scale = 1024 },
+    .{ .flag = 'n', .res = 7, .desc = "open files", .unit = "", .scale = 1 },
+    .{ .flag = 'p', .res = -1, .desc = "pipe size", .unit = "512 bytes", .scale = 1 },
+    .{ .flag = 'q', .res = 12, .desc = "POSIX message queues", .unit = "bytes", .scale = 1 },
+    .{ .flag = 'r', .res = 14, .desc = "real-time priority", .unit = "", .scale = 1 },
+    .{ .flag = 's', .res = 3, .desc = "stack size", .unit = "kbytes", .scale = 1024 },
+    .{ .flag = 't', .res = 0, .desc = "cpu time", .unit = "seconds", .scale = 1 },
+    .{ .flag = 'u', .res = 6, .desc = "max user processes", .unit = "", .scale = 1 },
+    .{ .flag = 'v', .res = 9, .desc = "virtual memory", .unit = "kbytes", .scale = 1024 },
+    .{ .flag = 'x', .res = 10, .desc = "file locks", .unit = "", .scale = 1 },
 };
+
+fn get_limit(l: Limit, rl: *sys.RLimit) void {
+    if (l.res < 0) {
+        rl.* = .{ .cur = 8, .max = 8 };
+        return;
+    }
+    _ = sys.getrlimit(l.res, rl);
+}
 
 fn bi_ulimit(sh: *Shell, argv: []const []const u8) Err!u8 {
     var hard = false;
@@ -2006,21 +2020,29 @@ fn bi_ulimit(sh: *Shell, argv: []const []const u8) Err!u8 {
         var out: std.ArrayList(u8) = .empty;
         for (limits) |l| {
             var rl: sys.RLimit = undefined;
-            _ = sys.getrlimit(l.res, &rl);
+            get_limit(l, &rl);
             const v = if (hard) rl.max else rl.cur;
-            try out.print(sh.sa, "{s: <27}(-{c}) ", .{ l.desc, l.flag });
-            if (v == std.math.maxInt(u64)) try out.appendSlice(sh.sa, "unlimited\n") else try out.print(sh.sa, "{d}\n", .{v / l.scale});
+            const unit_txt = if (l.unit.len > 0) try std.fmt.allocPrint(sh.sa, "({s}, -{c})", .{ l.unit, l.flag }) else try std.fmt.allocPrint(sh.sa, "(-{c})", .{l.flag});
+            const pad = @max(@as(isize, 40) - @as(isize, @intCast(l.desc.len)) - @as(isize, @intCast(unit_txt.len)), 2);
+            try out.appendSlice(sh.sa, l.desc);
+            try out.appendNTimes(sh.sa, ' ', @intCast(pad));
+            try out.appendSlice(sh.sa, unit_txt);
+            if (v == std.math.maxInt(u64)) try out.appendSlice(sh.sa, " unlimited\n") else try out.print(sh.sa, " {d}\n", .{v / l.scale});
         }
         _ = sh.out(out.items);
         return 0;
     }
-    const lim = which orelse limits[3];
+    const lim = which orelse limits[4];
     var rl: sys.RLimit = undefined;
-    _ = sys.getrlimit(lim.res, &rl);
+    get_limit(lim, &rl);
     if (i >= argv.len) {
         const v = if (hard) rl.max else rl.cur;
         if (v == std.math.maxInt(u64)) _ = sh.out("unlimited\n") else _ = sh.outf("{d}\n", .{v / lim.scale});
         return 0;
+    }
+    if (lim.res < 0) {
+        sh.bmsg("ulimit", "{s}: cannot modify limit: Invalid argument", .{lim.desc});
+        return 1;
     }
     const arg = argv[i];
     var nv: u64 = undefined;
@@ -2031,7 +2053,7 @@ fn bi_ulimit(sh: *Shell, argv: []const []const u8) Err!u8 {
         };
         nv = n * lim.scale;
     }
-    if (hard or !soft) rl.max = if (hard or !soft) nv else rl.max;
+    if (hard or !soft) rl.max = nv;
     if (soft or !hard) rl.cur = nv;
     if (hard and !soft) {
         if (rl.cur > rl.max) rl.cur = rl.max;

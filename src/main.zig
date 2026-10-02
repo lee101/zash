@@ -117,6 +117,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
     interp.setup(sh, env_ptrs, script_name) catch return 1;
     sh.dash_c = command != null;
+    interp.exec.set_last_arg(sh, args[0]);
     sh.interactive = interactive;
     sh.set_pos_args(pos_args) catch return 1;
     {
