@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const common = @import("common.zig");
+const ucp = @import("ucp.zig");
 
 pub const ByteSet = struct {
     bits: [4]u64 = .{ 0, 0, 0, 0 },
@@ -53,10 +54,12 @@ pub const ByteSet = struct {
 
 pub const Syntax = enum { bre, ere, fixed, rust };
 
+pub const Unicode = enum { none, glibc, rust };
+
 pub const Options = struct {
     syntax: Syntax = .bre,
     icase: bool = false,
-    utf8: bool = false,
+    unicode: Unicode = .none,
     line_mode: bool = true,
     whole_line: bool = false,
 };
@@ -148,7 +151,7 @@ const Parser = struct {
                 return error.Invalid;
             }
             var atom = (try self.parseAtom(first, items.items.len == 1 and bre and isBolAnchor(items.items[0]))) orelse continue;
-            atom = try self.parseQuantifiers(atom);
+            if (self.opts.syntax != .fixed) atom = try self.parseQuantifiers(atom);
             try items.append(self.arena, atom);
             first = false;
         }
@@ -161,60 +164,68 @@ const Parser = struct {
         return n.* == .assert and n.assert == .bol;
     }
 
+    fn uni(self: *const Parser) bool {
+        return self.opts.unicode != .none;
+    }
+
+    fn charset(self: *const Parser) ucp.Charset {
+        return if (self.opts.unicode == .rust) .rust else .glibc;
+    }
+
     fn literalNode(self: *Parser, c: u8) CompileError!*Node {
+        if (self.uni() and self.opts.icase and std.ascii.isAlphabetic(c)) {
+            var cs: ucp.CpSet = .{};
+            try cs.add(self.arena, c, c);
+            return self.cpFold(&cs, false);
+        }
         var s: ByteSet = .{};
         s.add(c);
         if (self.opts.icase and std.ascii.isAlphabetic(c)) {
-            self.sensitive = true;
             s.add(std.ascii.toLower(c));
             s.add(std.ascii.toUpper(c));
         }
         return self.node(.{ .set = s });
     }
 
+    fn cpFold(self: *Parser, cs: *ucp.CpSet, exotic: bool) CompileError!*Node {
+        if (self.opts.icase) try cs.foldClosure(self.arena, ucp.foldClasses(self.charset()));
+        return self.cpNode(cs, exotic);
+    }
+
+    fn decodeCp(self: *Parser, s: []const u8) ?struct { cp: u32, len: usize } {
+        const n = std.unicode.utf8ByteSequenceLength(s[0]) catch return null;
+        if (n > s.len) return null;
+        const cp = std.unicode.utf8Decode(s[0..n]) catch return null;
+        _ = self;
+        return .{ .cp = cp, .len = n };
+    }
+
     fn literalCp(self: *Parser) CompileError!*Node {
         const c = self.src[self.pos];
-        if (c < 0x80 or !self.opts.utf8) {
+        if (c < 0x80 or !self.uni()) {
             self.pos += 1;
             return self.literalNode(c);
         }
-        const dec = uniDecode(self.src[self.pos..]);
-        const n = dec orelse {
+        const d = self.decodeCp(self.src[self.pos..]) orelse {
             self.pos += 1;
             return self.literalNode(c);
         };
-        if (self.opts.icase) return error.Unsupported;
-        var items: std.ArrayList(*Node) = .empty;
-        for (self.src[self.pos..][0..n]) |b| {
-            var s: ByteSet = .{};
-            s.add(b);
-            try items.append(self.arena, try self.node(.{ .set = s }));
-        }
-        self.pos += n;
-        return self.node(.{ .cat = items.items });
+        self.pos += d.len;
+        var cs: ucp.CpSet = .{};
+        try cs.add(self.arena, d.cp, d.cp);
+        return self.cpFold(&cs, false);
     }
 
     fn anyNode(self: *Parser) CompileError!*Node {
-        if (!self.opts.utf8) {
+        if (!self.uni()) {
             var s: ByteSet = .{};
             s.negate();
             if (self.opts.line_mode) s.remove('\n');
             return self.node(.{ .set = s });
         }
-        return self.utf8Any(.{});
-    }
-
-    fn utf8Any(self: *Parser, ascii_excluded: ByteSet) CompileError!*Node {
-        var ascii: ByteSet = .{};
-        ascii.addRange(0, 0x7f);
-        for (0..4) |i| ascii.bits[i] &= ~ascii_excluded.bits[i];
-        if (self.opts.line_mode) ascii.remove('\n');
-        const multi = try self.utf8Multi();
-        const a = try self.node(.{ .set = ascii });
-        const alts = try self.arena.alloc(*Node, 2);
-        alts[0] = a;
-        alts[1] = multi;
-        return self.node(.{ .alt = alts });
+        var cs: ucp.CpSet = .{};
+        try cs.add(self.arena, 0, ucp.max_cp);
+        return self.cpNode(&cs, true);
     }
 
     fn rangeNode(self: *Parser, lo: u8, hi: u8) CompileError!*Node {
@@ -223,25 +234,76 @@ const Parser = struct {
         return self.node(.{ .set = s });
     }
 
-    fn seq(self: *Parser, parts: []const [2]u8) CompileError!*Node {
+    fn seqNode(self: *Parser, parts: []const [2]u8) CompileError!*Node {
         const items = try self.arena.alloc(*Node, parts.len);
         for (parts, 0..) |p, i| items[i] = try self.rangeNode(p[0], p[1]);
         return self.node(.{ .cat = items });
     }
 
-    fn utf8Multi(self: *Parser) CompileError!*Node {
-        const alts = try self.arena.alloc(*Node, 7);
-        alts[0] = try self.seq(&.{ .{ 0xc2, 0xdf }, .{ 0x80, 0xbf } });
-        alts[1] = try self.seq(&.{ .{ 0xe0, 0xe0 }, .{ 0xa0, 0xbf }, .{ 0x80, 0xbf } });
-        alts[2] = try self.seq(&.{ .{ 0xe1, 0xec }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
-        alts[3] = try self.seq(&.{ .{ 0xed, 0xed }, .{ 0x80, 0x9f }, .{ 0x80, 0xbf } });
-        alts[4] = try self.seq(&.{ .{ 0xee, 0xef }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
-        alts[5] = try self.seq(&.{ .{ 0xf0, 0xf0 }, .{ 0x90, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
-        const tail = try self.arena.alloc(*Node, 2);
-        tail[0] = try self.seq(&.{ .{ 0xf1, 0xf7 }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
-        tail[1] = try self.seq(&.{ .{ 0xf8, 0xfb }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
-        alts[6] = try self.node(.{ .alt = tail });
+    fn exoticNode(self: *Parser) CompileError!*Node {
+        const alts = try self.arena.alloc(*Node, 6);
+        alts[0] = try self.seqNode(&.{ .{ 0xf4, 0xf4 }, .{ 0x90, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
+        alts[1] = try self.seqNode(&.{ .{ 0xf5, 0xf7 }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
+        alts[2] = try self.seqNode(&.{ .{ 0xf8, 0xf8 }, .{ 0x88, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
+        alts[3] = try self.seqNode(&.{ .{ 0xf9, 0xfb }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
+        alts[4] = try self.seqNode(&.{ .{ 0xfc, 0xfc }, .{ 0x84, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
+        alts[5] = try self.seqNode(&.{ .{ 0xfd, 0xfd }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf }, .{ 0x80, 0xbf } });
         return self.node(.{ .alt = alts });
+    }
+
+    fn trieNode(self: *Parser, seqs: []const ucp.Seq, depth: usize) CompileError!*Node {
+        var alts: std.ArrayList(*Node) = .empty;
+        var i: usize = 0;
+        while (i < seqs.len) {
+            var j = i + 1;
+            const key = seqs[i].r[depth];
+            while (j < seqs.len and seqs[j].len > depth and std.mem.eql(u8, &seqs[j].r[depth], &key)) j += 1;
+            const range = try self.rangeNode(key[0], key[1]);
+            var all_end = true;
+            for (seqs[i..j]) |sq| {
+                if (sq.len != depth + 1) all_end = false;
+            }
+            if (all_end) {
+                try alts.append(self.arena, range);
+            } else {
+                const items = try self.arena.alloc(*Node, 2);
+                items[0] = range;
+                items[1] = try self.trieNode(seqs[i..j], depth + 1);
+                try alts.append(self.arena, try self.node(.{ .cat = items }));
+            }
+            i = j;
+        }
+        if (alts.items.len == 1) return alts.items[0];
+        return self.node(.{ .alt = alts.items });
+    }
+
+    fn cpNode(self: *Parser, cs: *ucp.CpSet, exotic: bool) CompileError!*Node {
+        cs.normalize();
+        var ascii: ByteSet = .{};
+        var seqs: std.ArrayList(ucp.Seq) = .empty;
+        for (cs.r.items) |r| {
+            if (r[0] < 0x80) ascii.addRange(@intCast(r[0]), @intCast(@min(r[1], 0x7f)));
+            if (r[1] >= 0x80) try ucp.utf8Sequences(self.arena, @max(r[0], 0x80), @min(r[1], ucp.max_cp), &seqs);
+        }
+        if (self.opts.line_mode) ascii.remove('\n');
+        var parts: std.ArrayList(*Node) = .empty;
+        if (!ascii.isEmpty() or seqs.items.len == 0) try parts.append(self.arena, try self.node(.{ .set = ascii }));
+        if (seqs.items.len > 0) {
+            std.mem.sort(ucp.Seq, seqs.items, {}, struct {
+                fn lt(_: void, x: ucp.Seq, y: ucp.Seq) bool {
+                    var k: usize = 0;
+                    while (k < x.len and k < y.len) : (k += 1) {
+                        if (x.r[k][0] != y.r[k][0]) return x.r[k][0] < y.r[k][0];
+                        if (x.r[k][1] != y.r[k][1]) return x.r[k][1] < y.r[k][1];
+                    }
+                    return x.len < y.len;
+                }
+            }.lt);
+            try parts.append(self.arena, try self.trieNode(seqs.items, 0));
+        }
+        if (exotic and self.opts.unicode == .glibc) try parts.append(self.arena, try self.exoticNode());
+        if (parts.items.len == 1) return parts.items[0];
+        return self.node(.{ .alt = parts.items });
     }
 
     fn assertNode(self: *Parser, a: Assert) CompileError!*Node {
@@ -249,36 +311,51 @@ const Parser = struct {
         switch (a) {
             .word_b, .nword_b, .word_start, .word_end => {
                 self.has_word_assert = true;
-                self.sensitive = true;
+                if (self.uni()) self.sensitive = true;
             },
             else => {},
         }
         return self.node(.{ .assert = a });
     }
 
-    fn classSet(name: []const u8, set: *ByteSet) bool {
+    fn asciiClass(name: []const u8, b: u8) ?bool {
         const Cl = enum { alnum, alpha, blank, cntrl, digit, graph, lower, print, punct, space, upper, xdigit };
-        const cl = std.meta.stringToEnum(Cl, name) orelse return false;
-        var c: usize = 0;
-        while (c < 128) : (c += 1) {
-            const b: u8 = @intCast(c);
-            const ok = switch (cl) {
-                .alnum => std.ascii.isAlphanumeric(b),
-                .alpha => std.ascii.isAlphabetic(b),
-                .blank => b == ' ' or b == '\t',
-                .cntrl => b < 32 or b == 127,
-                .digit => std.ascii.isDigit(b),
-                .graph => b > 32 and b < 127,
-                .lower => std.ascii.isLower(b),
-                .print => b >= 32 and b < 127,
-                .punct => b > 32 and b < 127 and !std.ascii.isAlphanumeric(b),
-                .space => (b >= 9 and b <= 13) or b == 32,
-                .upper => std.ascii.isUpper(b),
-                .xdigit => std.ascii.isHex(b),
-            };
-            if (ok) set.add(b);
+        const cl = std.meta.stringToEnum(Cl, name) orelse return null;
+        return switch (cl) {
+            .alnum => std.ascii.isAlphanumeric(b),
+            .alpha => std.ascii.isAlphabetic(b),
+            .blank => b == ' ' or b == '\t',
+            .cntrl => b < 32 or b == 127,
+            .digit => std.ascii.isDigit(b),
+            .graph => b > 32 and b < 127,
+            .lower => std.ascii.isLower(b),
+            .print => b >= 32 and b < 127,
+            .punct => b > 32 and b < 127 and !std.ascii.isAlphanumeric(b),
+            .space => (b >= 9 and b <= 13) or b == 32,
+            .upper => std.ascii.isUpper(b),
+            .xdigit => std.ascii.isHex(b),
+        };
+    }
+
+    fn addClass(self: *Parser, cs: *ucp.CpSet, name: []const u8) CompileError!void {
+        if (asciiClass(name, 'a') == null) return error.Invalid;
+        const eff: []const u8 = if (self.opts.icase and (std.mem.eql(u8, name, "upper") or std.mem.eql(u8, name, "lower"))) "alpha" else name;
+        if (self.opts.unicode == .glibc) {
+            const tbl = ucp.classTable(.glibc, eff) orelse return error.Invalid;
+            try cs.addTable(self.arena, tbl);
+            return;
         }
-        return true;
+        var b: usize = 0;
+        while (b < 128) : (b += 1) {
+            if (asciiClass(eff, @intCast(b)).?) try cs.add(self.arena, @intCast(b), @intCast(b));
+        }
+    }
+
+    fn unitAt(self: *Parser, at: usize) CompileError!struct { cp: u32, len: usize } {
+        const c = self.src[at];
+        if (c < 0x80 or !self.uni()) return .{ .cp = c, .len = 1 };
+        const d = self.decodeCp(self.src[at..]) orelse return error.Unsupported;
+        return .{ .cp = d.cp, .len = d.len };
     }
 
     fn parseBracket(self: *Parser) CompileError!*Node {
@@ -288,7 +365,7 @@ const Parser = struct {
             neg = true;
             self.pos += 1;
         }
-        var set: ByteSet = .{};
+        var cs: ucp.CpSet = .{};
         var first = true;
         while (true) {
             const c = self.peek() orelse return error.Invalid;
@@ -304,32 +381,37 @@ const Parser = struct {
                 const name = rest[0..close];
                 self.pos += 2 + close + 2;
                 if (kind == ':') {
-                    if (!classSet(name, &set)) return error.Invalid;
-                    if (!std.mem.eql(u8, name, "digit") and !std.mem.eql(u8, name, "xdigit")) self.sensitive = true;
-                    if (self.opts.icase and (std.mem.eql(u8, name, "upper") or std.mem.eql(u8, name, "lower"))) {
-                        _ = classSet("alpha", &set);
-                    }
+                    try self.addClass(&cs, name);
                 } else {
-                    if (name.len != 1 or name[0] >= 0x80) return error.Unsupported;
-                    set.add(name[0]);
+                    if (name.len == 0) return error.Invalid;
+                    const u = try self.unitAt2(name);
+                    if (u.len != name.len) return error.Unsupported;
+                    try cs.add(self.arena, u.cp, u.cp);
                 }
                 if (self.peek() == '-' and self.pos + 1 < self.src.len and self.src[self.pos + 1] != ']') return error.Invalid;
                 continue;
             }
-            if (c >= 0x80 and self.opts.utf8) return error.Unsupported;
-            self.pos += 1;
+            const lo = try self.unitAt(self.pos);
+            self.pos += lo.len;
             if (self.peek() == '-' and self.pos + 1 < self.src.len and self.src[self.pos + 1] != ']') {
                 self.pos += 1;
-                const hi = self.src[self.pos];
-                if (hi == '[' and self.pos + 1 < self.src.len and (self.src[self.pos + 1] == '.' or self.src[self.pos + 1] == '=' or self.src[self.pos + 1] == ':')) return error.Unsupported;
-                if (hi >= 0x80 and self.opts.utf8) return error.Unsupported;
-                self.pos += 1;
-                if (hi < c) return error.Invalid;
-                set.addRange(c, hi);
-            } else set.add(c);
+                const h0 = self.src[self.pos];
+                if (h0 == '[' and self.pos + 1 < self.src.len and (self.src[self.pos + 1] == '.' or self.src[self.pos + 1] == '=' or self.src[self.pos + 1] == ':')) return error.Unsupported;
+                const hi = try self.unitAt(self.pos);
+                self.pos += hi.len;
+                if (hi.cp < lo.cp) return error.Invalid;
+                if (self.opts.unicode == .glibc and (hi.cp >= 0x80 or lo.cp >= 0x80)) return error.Unsupported;
+                try cs.add(self.arena, lo.cp, hi.cp);
+            } else try cs.add(self.arena, lo.cp, lo.cp);
         }
+        if (self.uni()) {
+            if (self.opts.icase) try cs.foldClosure(self.arena, ucp.foldClasses(self.charset()));
+            if (neg) try cs.negate(self.arena, ucp.max_cp);
+            return self.cpNode(&cs, neg);
+        }
+        var set: ByteSet = .{};
+        for (cs.r.items) |r| set.addRange(@intCast(r[0]), @intCast(@min(r[1], 255)));
         if (self.opts.icase) {
-            self.sensitive = true;
             var extra: ByteSet = .{};
             var b: usize = 'a';
             while (b <= 'z') : (b += 1) {
@@ -342,17 +424,15 @@ const Parser = struct {
             }
             set.unite(extra);
         }
-        if (neg) {
-            if (self.opts.utf8) {
-                var ascii_excl: ByteSet = set;
-                for (128..256) |i| ascii_excl.remove(@intCast(i));
-                return self.utf8Any(ascii_excl);
-            }
-            set.negate();
-        }
+        if (neg) set.negate();
         if (self.opts.line_mode) set.remove('\n');
-        if (set.isEmpty()) return self.node(.{ .set = set });
         return self.node(.{ .set = set });
+    }
+
+    fn unitAt2(self: *Parser, s: []const u8) CompileError!struct { cp: u32, len: usize } {
+        if (s[0] < 0x80 or !self.uni()) return .{ .cp = s[0], .len = 1 };
+        const d = self.decodeCp(s) orelse return error.Unsupported;
+        return .{ .cp = d.cp, .len = d.len };
     }
 
     fn parseGroup(self: *Parser) CompileError!*Node {
@@ -482,40 +562,41 @@ const Parser = struct {
         const syn = self.opts.syntax;
         if (syn == .bre and e == '(') return try self.parseGroup();
         switch (e) {
-            'w', 'W' => {
-                self.sensitive = true;
+            'w', 'W', 's', 'S', 'd', 'D' => {
+                if (e == 'd' or e == 'D') {
+                    if (syn != .rust) return error.Unsupported;
+                }
+                const lower = std.ascii.toLower(e);
+                const negated = std.ascii.isUpper(e);
+                self.pos += 2;
+                if (lower == 'w') self.has_word_assert = true;
+                if (self.uni()) {
+                    var cs: ucp.CpSet = .{};
+                    const name: []const u8 = switch (lower) {
+                        'w' => "word",
+                        's' => "space",
+                        else => "digit",
+                    };
+                    if (ucp.classTable(self.charset(), name)) |tbl| {
+                        try cs.addTable(self.arena, tbl);
+                    } else return error.Unsupported;
+                    if (negated) try cs.negate(self.arena, ucp.max_cp);
+                    cs.normalize();
+                    return self.cpNode(&cs, negated);
+                }
                 var s: ByteSet = .{};
                 var b: usize = 0;
-                while (b < 128) : (b += 1) if (isWordByte(@intCast(b))) s.add(@intCast(b));
-                if (e == 'W') {
-                    s.negate();
-                    if (self.opts.utf8) {
-                        var ascii_excl: ByteSet = .{};
-                        b = 0;
-                        while (b < 128) : (b += 1) if (isWordByte(@intCast(b))) ascii_excl.add(@intCast(b));
-                        self.pos += 2;
-                        return self.utf8Any(ascii_excl);
-                    }
+                while (b < 128) : (b += 1) {
+                    const ch: u8 = @intCast(b);
+                    const ok = switch (lower) {
+                        'w' => isWordByte(ch),
+                        's' => (ch >= 9 and ch <= 13) or ch == 32,
+                        else => ch >= '0' and ch <= '9',
+                    };
+                    if (ok) s.add(ch);
                 }
+                if (negated) s.negate();
                 if (self.opts.line_mode) s.remove('\n');
-                self.pos += 2;
-                self.has_word_assert = true;
-                return self.node(.{ .set = s });
-            },
-            's', 'S' => {
-                self.sensitive = true;
-                var s: ByteSet = .{};
-                s.addRange(9, 13);
-                s.add(' ');
-                if (e == 'S') {
-                    if (self.opts.utf8) {
-                        self.pos += 2;
-                        return self.utf8Any(s);
-                    }
-                    s.negate();
-                }
-                if (self.opts.line_mode) s.remove('\n');
-                self.pos += 2;
                 return self.node(.{ .set = s });
             },
             'b' => {

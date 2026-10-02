@@ -4,7 +4,7 @@ from harness import Case
 FILES = ["g1", "g2", "gnonl", "gtext", "gdense", "empty", "nl", "lines5", "words", "code.py", "mixed", "crlf", "blank", "longline", "binary", "bin_nul", "badutf8", "utf8", "nofile", "dir", "emptydir", "invalid8", "utf8mix", "nulbig", "nulbig2"]
 BRE = ["foo", "o", "^foo", "foo$", "^$", ".", "..*", "fo*", "fo\\+", "foo\\|bar", "\\(fo\\)o", "f.o", "[a-c]", "[^a-z]", "[[:upper:]]", "[[:digit:]]", "\\bfoo\\b", "\\<foo", "foo\\>", "\\w\\+", "a*", "x*", "^", "$", "foo.*bar", "fo\\{2\\}", "fo\\{1,2\\}", "\\(a\\|b\\)c", "TAB", "bar foo", "o.o", "[[:space:]]foo", "^[[:space:]]*$", "e$", "\\.", "\\*", "a\\.b", "*foo", "^*", "[]]", "[a-]", "foo\\(bar\\)\\?", "fo\\?o", "\\(foo\\)\\{2\\}", "^\\(.*\\)o$", "ba[rz]", "[[:alpha:]]\\{3\\}", "\\W", "\\s", "\\S\\+"]
 ERE = ["foo", "foo|bar", "(fo)+o", "f.o", "fo+", "fo?o", "^foo$", "[a-c]+", "a{2}", "o{1,2}", "(a|b)c", "\\bfoo\\b", "\\<foo\\>", "x*", "^$", "^", "$", "foo.*bar", "(foo|bar) (foo|baz)", "\\.", "a{,2}b", "a{1", "{", "foo{", "[0-9]+", "(^| )foo", "foo( |$)", "(a|b|c)+", "^(.*)o$", "\\w+", "()", "a|", "|a", "(a|)b", "[[:alpha:]]+", "\\s+", "b?a?r", "foo$|^bar"]
-FIXED = ["foo", "o", "foo.bar", "a.b", ".", "", "foo bar", "*", "\\", "foo\nbar", "bar\nfoo"]
+FIXED = ["a*", "o+", "f?o", "[a]", "foo",  "o", "foo.bar", "a.b", ".", "", "foo bar", "*", "\\", "foo\nbar", "bar\nfoo"]
 
 
 def cases(fx):
@@ -118,8 +118,15 @@ def cases(fx):
                 yield Case(["grep", "-v", pat, f], env=env)
                 yield Case(["grep", "-vn", "-C1", pat, f], env=env)
                 yield Case(["grep", "-a", pat, f], env=env)
-        yield Case(["grep", "-i", "foo", "utf8mix"], env=env, unsupported=True)
         yield Case(["grep", "-w", "foo", "utf8mix"], env=env, unsupported=True)
+        for pat in ["caf\u00e9", "\u00c9cole", "\u00fcber", "stra\u00dfe", "strasse", "istanbul", "\u0130stanbul", "s", "k", "\u03c3", "\u03a3", "\u03b1\u03b2", "\u043f\u0440\u0438\u0432\u0435\u0442", "[[:alpha:]]\\+", "[[:upper:]]", "[[:lower:]]\\+", "[[:digit:]]", "[[:alnum:]]*", "[[:punct:]]", "[[:space:]]", "\\w\\+", "\\W", "\\s", "\\S\\+", "[\u00e9\u00e8]", "[^\u00e9a-z ]", "\u00e9*", "\u4e2d.", ".\u6587", "x.", "^.\\{3\\}$", "[[:print:]]*", "[[:graph:]]\\+", "[[:cntrl:]]", "[[:blank:]]", "\u00b2", "\u2467", "[0-9]\\+"]:
+            for f in ["unitext", "utf8mix", "invalid8"]:
+                for o in [[], ["-o"], ["-c"], ["-i"], ["-io"], ["-v"], ["-ion"], ["-E"], ["-Eo"], ["-F"], ["-Fi"], ["-x"], ["-ix"]]:
+                    yield Case(["grep"] + o + [pat, f], env=env)
+        for loc2 in ["en_AU.utf8"]:
+            for pat in ["caf\u00e9", "[[:alpha:]]\\+", "\\w\\+", "\u00fcber"]:
+                for o in [["-i"], ["-io"], []]:
+                    yield Case(["grep"] + o + [pat, "unitext"], env={"LC_ALL": loc2})
     # unsupported
     for bad in [["-P", "foo", "g1"], ["-E", "(a)\\1", "g1"], ["--color=always", "foo", "g1"], ["-z", "foo", "g1"], ["-f", "g1", "g2"], ["foo", "-T", "g1"], ["-E", "*a", "g1"], ["--help"], ["-V"], ["-e"], ["-A", "x", "foo", "g1"], ["-m", "x", "foo", "g1"], ["-o", "-v", "foo", "g1"], ["-o", "-C1", "foo", "g1"], ["--exclude=a", "--include=b", "foo", "g1"], ["-E", "[", "g1"], ["foo\\(", "g1"], ["[[:foo:]]", "g1"], ["--binary-files=bogus", "foo", "g1"], ["-d", "bogus", "foo", "g1"], ["-D", "skip", "foo", "g1"]]:
         yield Case(["grep"] + bad, unsupported=True)

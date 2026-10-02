@@ -148,6 +148,7 @@ def fixtures(dst, big=False):
     w("nulbig", b"x\n" * 100000 + b"\x00" + b"y\n" * 10 + b"foo\n")
     w("nulbig2", b"foo\n" * 30000 + b"a\x00b foo\n" + b"foo\n" * 5)
     w("utf8mix", "caf\u00e9 foo\nna\u00efve bar\nplain foo\n\u65e5\u672c foo\n".encode())
+    w("unitext", "Caf\u00e9 \u00c9COLE na\u00efve \u00dcber stra\u00dfe STRASSE \u0130stanbul \u017fs K\u212a kelvin\nGr\u00fc\u00dfe \u4e2d\u6587 \u0645\u0631\u062d\u0628\u0627 \u043f\u0440\u0438\u0432\u0435\u0442 \u041f\u0420\u0418\u0412\u0415\u0422\n\u03b1\u03b2\u03b3 \u0391\u0392\u0393 \u03c3 \u03c2 \u03a3\nnumbers \u0663\u0664 \u2467 123 \u00b2\n\u00a0nbsp\u00a0here\u2003em\u3000ideo\ntab\there \u2028 sep\nemoji \U0001f600 \U0001f1fa\U0001f1f8 x\u0301 y\n".encode())
     w("invalid8", b"ok foo\nbad \xff foo\nfine foo\n\xc3\x28 foo\n")
     os.makedirs(os.path.join(dst, "emptydir"), exist_ok=True)
     try:

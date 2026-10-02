@@ -262,7 +262,7 @@ fn regexOptions(cfg: Config, utf8: bool) regex.Options {
             .fixed => .fixed,
         },
         .icase = cfg.icase,
-        .utf8 = utf8,
+        .unicode = if (utf8) .glibc else .none,
         .line_mode = true,
         .whole_line = cfg.line,
     };
@@ -302,7 +302,7 @@ fn checkSupported(argv: []const []const u8, env: ?*const common.EnvView) bool {
         if (cfg.word and re.can_be_empty) return false;
         if (utf8 and (re.sensitive or cfg.word)) return false;
         if (re.nfa.states.items.len > 20000) return false;
-    } else if (utf8 and cfg.icase) return false;
+    }
     return true;
 }
 
