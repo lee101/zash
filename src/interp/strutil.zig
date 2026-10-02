@@ -86,18 +86,16 @@ pub fn quote_for_at_q(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Allo
 
 pub fn quote_xtrace(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Allocator.Error!void {
     if (s.len == 0) return out.appendSlice(a, "''");
-    if (has_ctl(s)) return ansi_quote(a, out, s);
     var plain = true;
-    for (s) |c| {
+    for (s, 0..) |c, i| {
         switch (c) {
-            'a'...'z', 'A'...'Z', '0'...'9', '_', '-', '.', '/', ':', ',', '@', '%', '+', '=', '~', '^', '#', '*', '?', '[', ']', '(', ')', '{', '}', '!', '<', '>', '&', ';', '|', '$', '`', '"', '\\', ' ', '\'' => {
-                switch (c) {
-                    '*', '?', '[', ']', '(', ')', '{', '}', '!', '<', '>', '&', ';', '|', '$', '`', '"', '\\', ' ', '\'', '#', '^' => plain = false,
-                    else => {},
-                }
+            'a'...'z', 'A'...'Z', '0'...'9', '_', '-', '.', '/', ':', ',', '@', '%', '+', '=' => {},
+            '~', '#' => if (i == 0) {
+                plain = false;
             },
             else => plain = false,
         }
+        if (!plain) break;
     }
     if (plain) return out.appendSlice(a, s);
     return single_quote(a, out, s);

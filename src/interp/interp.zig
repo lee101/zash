@@ -133,7 +133,10 @@ pub fn setup(sh: *Shell, environ: []const ?[*:0]const u8, script_name: []const u
             try set_plain(sh, "PWD", cwd);
         }
     }
-    if (sh.vars.get("PWD")) |pv| pv.flags.exported = true;
+    if (sh.vars.get("PWD")) |pv| {
+        pv.flags.exported = true;
+        if (pv.value == .str) try sh.set_cwd_logical(pv.value.str);
+    }
     if (sh.vars.get("OLDPWD") == null) {
         const v = try sh.vars.get_or_create(gpa, "OLDPWD");
         v.flags.exported = true;
@@ -172,7 +175,7 @@ fn run_script_inner(sh: *Shell, src: []const u8, label_prefix: []const u8) Err!u
     var p = parser.Parser.init(a, src, .{});
     const res = p.parse_script();
     if (res) |list| {
-        const st = try exec.run_top(sh, list);
+        const st = try exec.run_top(sh, list, src);
         return finish(sh, st);
     } else |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -185,7 +188,7 @@ fn run_script_inner(sh: *Shell, src: []const u8, label_prefix: []const u8) Err!u
                 const prefix = src[0..offs[cut]];
                 var p2 = parser.Parser.init(a, prefix, .{});
                 if (p2.parse_script()) |list| {
-                    _ = exec.run_top(sh, list) catch |ee| switch (ee) {
+                    _ = exec.run_top(sh, list, prefix) catch |ee| switch (ee) {
                         error.Exit => return finish(sh, sh.exit_status_pending orelse sh.status),
                         else => {},
                     };
@@ -203,11 +206,11 @@ fn run_script_inner(sh: *Shell, src: []const u8, label_prefix: []const u8) Err!u
 pub fn finish(sh: *Shell, status: u8) u8 {
     var st = status;
     sh.exit_status_pending = null;
-    if (sh.trap_exit.kind == .cmd) {
+    if (sh.trap_exit.kind == .cmd and !sh.trap_exit.inherited) {
         const cmd = sh.trap_exit.cmd;
         sh.trap_exit = .{};
         sh.status = st;
-        exec.run_trap_text(sh, cmd) catch |e| switch (e) {
+        exec.run_trap_text(sh, cmd, 0) catch |e| switch (e) {
             error.Exit => {
                 st = sh.exit_status_pending orelse sh.status;
                 return st;

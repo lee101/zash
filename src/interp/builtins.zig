@@ -120,13 +120,16 @@ pub fn lookup(name: []const u8) ?Builtin {
     return table.get(name);
 }
 
+var disabled_buf: [64][]const u8 = undefined;
+var disabled_n: usize = 0;
+
 fn sh_disabled_check(name: []const u8) bool {
-    _ = name;
+    for (disabled_buf[0..disabled_n]) |d| if (std.mem.eql(u8, d, name)) return true;
     return false;
 }
 
 pub fn is_builtin(name: []const u8) bool {
-    return table.get(name) != null;
+    return lookup(name) != null;
 }
 
 fn bi_colon(sh: *Shell, argv: []const []const u8) Err!u8 {
@@ -191,6 +194,11 @@ fn bi_echo(sh: *Shell, argv: []const []const u8) Err!u8 {
                         stop = true;
                         newline = false;
                         break;
+                    }
+                    if (s[k + 1] >= '1' and s[k + 1] <= '7') {
+                        try out.append(a, '\\');
+                        k += 1;
+                        continue;
                     }
                     if (s[k + 1] == '0') {
                         var v: u32 = 0;
@@ -265,17 +273,9 @@ fn bi_pwd(sh: *Shell, argv: []const []const u8) Err!u8 {
             }
         }
     }
-    if (!physical) {
-        if (sh.get_scalar("PWD")) |p| {
-            if (p.len > 0 and p[0] == '/') {
-                const a = sys.stat_path(p, true);
-                const b = sys.stat_path(".", true);
-                if (a != null and b != null and a.?.ino == b.?.ino and a.?.dev == b.?.dev) {
-                    _ = sh.out(try std.mem.concat(sh.sa, u8, &.{ p, "\n" }));
-                    return 0;
-                }
-            }
-        }
+    if (!physical and sh.cwd_logical.len > 0) {
+        _ = sh.out(try std.mem.concat(sh.sa, u8, &.{ sh.cwd_logical, "\n" }));
+        return 0;
     }
     const cwd = physical_cwd(sh) orelse {
         sh.bmsg("pwd", "error retrieving current directory: getcwd: cannot access parent directories: {s}", .{sys.msg_for(sys.errno())});
@@ -285,7 +285,7 @@ fn bi_pwd(sh: *Shell, argv: []const []const u8) Err!u8 {
     return 0;
 }
 
-pub fn do_chdir(sh: *Shell, dir: []const u8, physical: bool, print_new: bool) Err!bool {
+pub fn do_chdir(sh: *Shell, who: []const u8, dir: []const u8, physical: bool, print_new: bool) Err!bool {
     var target: []const u8 = dir;
     var logical: ?[]const u8 = null;
     if (!physical) {
@@ -298,7 +298,7 @@ pub fn do_chdir(sh: *Shell, dir: []const u8, physical: bool, print_new: bool) Er
     }
     var buf: [4096]u8 = undefined;
     var z = sys.cstr(&buf, target) orelse {
-        sh.bmsg("cd", "{s}: File name too long", .{dir});
+        sh.bmsg(who, "{s}: File name too long", .{dir});
         return false;
     };
     if (sys.chdir(z) != 0) {
@@ -307,11 +307,11 @@ pub fn do_chdir(sh: *Shell, dir: []const u8, physical: bool, print_new: bool) Er
             if (sys.chdir(z) == 0) {
                 logical = null;
             } else {
-                sh.bmsg("cd", "{s}: {s}", .{ dir, sys.msg_for(sys.errno()) });
+                sh.bmsg(who, "{s}: {s}", .{ dir, sys.msg_for(sys.errno()) });
                 return false;
             }
         } else {
-            sh.bmsg("cd", "{s}: {s}", .{ dir, sys.msg_for(sys.errno()) });
+            sh.bmsg(who, "{s}: {s}", .{ dir, sys.msg_for(sys.errno()) });
             return false;
         }
     }
@@ -321,6 +321,7 @@ pub fn do_chdir(sh: *Shell, dir: []const u8, physical: bool, print_new: bool) Er
     }
     const newpwd: []const u8 = if (logical != null and !physical) logical.? else (physical_cwd(sh) orelse dir);
     try sh.assign_scalar("PWD", newpwd, false);
+    try sh.set_cwd_logical(newpwd);
     if (print_new) _ = sh.out(try std.mem.concat(sh.sa, u8, &.{ newpwd, "\n" }));
     return true;
 }
@@ -381,14 +382,14 @@ fn bi_cd(sh: *Shell, argv: []const []const u8) Err!u8 {
                 if (sys.stat_path(cand, true)) |st| {
                     if (st.is_dir()) {
                         const show = c.len > 0 and !std.mem.eql(u8, c, ".");
-                        const ok = try do_chdir(sh, cand, physical, show);
+                        const ok = try do_chdir(sh, "cd", cand, physical, show);
                         return if (ok) 0 else 1;
                     }
                 }
             }
         }
     }
-    const ok = try do_chdir(sh, dir, physical, print_new);
+    const ok = try do_chdir(sh, "cd", dir, physical, print_new);
     return if (ok) 0 else 1;
 }
 
@@ -763,11 +764,7 @@ fn bi_unset(sh: *Shell, argv: []const []const u8) Err!u8 {
                 continue;
             }
         }
-        if (!Shell.is_valid_name(n)) {
-            sh.bmsg("unset", "`{s}': not a valid identifier", .{n});
-            status = 1;
-            continue;
-        }
+        if (!Shell.is_valid_name(n)) continue;
         if (mode_n) {
             if (sh.vars.get(n)) |v| {
                 if (v.flags.nameref) {
@@ -851,12 +848,17 @@ fn bi_source(sh: *Shell, argv: []const []const u8) Err!u8 {
     }
     const saved_file = sh.cur_file;
     const saved_line = sh.lineno;
-    sh.cur_file = try sh.gpa.dupe(u8, name);
+    const src_func = try sh.gpa.create(shell.Func);
+    src_func.* = .{ .name = "source", .body = undefined, .file = try sh.gpa.dupe(u8, name), .line = 0 };
+    sh.cur_file = src_func.file;
+    try sh.frames.append(sh.gpa, .{ .func = src_func, .call_line = saved_line, .call_file = saved_file, .saved_pos = .empty, .saved_file = saved_file, .is_source = true });
     sh.in_source_depth += 1;
     const status = exec.run_source_text(sh, content, name, 0) catch |e| blk: {
         switch (e) {
             error.Return => break :blk sh.status,
             else => {
+                var fr = sh.frames.pop().?;
+                sh.pop_locals(&fr);
                 sh.in_source_depth -= 1;
                 sh.cur_file = saved_file;
                 sh.lineno = saved_line;
@@ -869,6 +871,8 @@ fn bi_source(sh: *Shell, argv: []const []const u8) Err!u8 {
             },
         }
     };
+    var fr = sh.frames.pop().?;
+    sh.pop_locals(&fr);
     sh.in_source_depth -= 1;
     sh.cur_file = saved_file;
     sh.lineno = saved_line;
@@ -2238,7 +2242,7 @@ fn bi_pushd(sh: *Shell, argv: []const []const u8) Err!u8 {
         }
         const top = sh.dir_stack.items[0];
         const topc = try sh.sa.dupe(u8, top);
-        if (!try do_chdir(sh, topc, false, false)) return 1;
+        if (!try do_chdir(sh, "pushd", topc, false, false)) return 1;
         sh.gpa.free(sh.dir_stack.items[0]);
         sh.dir_stack.items[0] = try sh.gpa.dupe(u8, cwd);
     } else {
@@ -2258,10 +2262,10 @@ fn bi_pushd(sh: *Shell, argv: []const []const u8) Err!u8 {
             for (sh.dir_stack.items) |d| sh.gpa.free(d);
             sh.dir_stack.clearRetainingCapacity();
             for (all.items[1..]) |d| try sh.dir_stack.append(sh.gpa, try sh.gpa.dupe(u8, d));
-            if (!try do_chdir(sh, all.items[0], false, false)) return 1;
+            if (!try do_chdir(sh, "pushd", all.items[0], false, false)) return 1;
         } else {
             if (!no_cd) {
-                if (!try do_chdir(sh, a, false, false)) return 1;
+                if (!try do_chdir(sh, "pushd", a, false, false)) return 1;
             }
             try sh.dir_stack.insert(sh.gpa, 0, try sh.gpa.dupe(u8, if (no_cd) (sh.get_scalar("PWD") orelse "") else cwd));
             if (no_cd) {
@@ -2296,7 +2300,7 @@ fn bi_popd(sh: *Shell, argv: []const []const u8) Err!u8 {
     if (idx == 0) {
         const top = try sh.sa.dupe(u8, sh.dir_stack.items[0]);
         if (!no_cd) {
-            if (!try do_chdir(sh, top, false, false)) return 1;
+            if (!try do_chdir(sh, "popd", top, false, false)) return 1;
         }
         sh.gpa.free(sh.dir_stack.orderedRemove(0));
     } else {
@@ -2333,22 +2337,73 @@ fn bi_complete(sh: *Shell, argv: []const []const u8) Err!u8 {
 }
 
 fn bi_enable(sh: *Shell, argv: []const []const u8) Err!u8 {
-    var out: std.ArrayList(u8) = .empty;
-    if (argv.len == 1 or (argv.len == 2 and std.mem.eql(u8, argv[1], "-a"))) {
-        var names: std.ArrayList([]const u8) = .empty;
-        for (table.keys()) |k| try names.append(sh.sa, k);
-        std.mem.sort([]const u8, names.items, {}, lessStr);
-        for (names.items) |n| try out.print(sh.sa, "enable {s}\n", .{n});
-        _ = sh.out(out.items);
+    var disable = false;
+    var list_all = false;
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const a = argv[i];
+        if (a.len < 2 or a[0] != '-') break;
+        if (std.mem.eql(u8, a, "--")) {
+            i += 1;
+            break;
+        }
+        for (a[1..]) |c| {
+            switch (c) {
+                'n' => disable = true,
+                'a' => list_all = true,
+                'p', 's', 'f', 'd' => {},
+                else => {
+                    sh.bmsg("enable", "-{c}: invalid option", .{c});
+                    sh.usage_msg("enable", "enable [-a] [-dnps] [-f filename] [name ...]");
+                    return 2;
+                },
+            }
+        }
     }
-    return 0;
+    var out: std.ArrayList(u8) = .empty;
+    if (i >= argv.len) {
+        var names: std.ArrayList([]const u8) = .empty;
+        if (disable) {
+            for (disabled_buf[0..disabled_n]) |d| try names.append(sh.sa, d);
+        } else {
+            for (table.keys()) |k| if (!sh_disabled_check(k)) try names.append(sh.sa, k);
+        }
+        std.mem.sort([]const u8, names.items, {}, lessStr);
+        for (names.items) |n| try out.print(sh.sa, "enable {s}{s}\n", .{ if (disable) "-n " else "", n });
+        _ = sh.out(out.items);
+        return 0;
+    }
+    var status: u8 = 0;
+    for (argv[i..]) |n| {
+        if (table.get(n) == null) {
+            sh.bmsg("enable", "{s}: not a shell builtin", .{n});
+            status = 1;
+            continue;
+        }
+        if (disable) {
+            if (!sh_disabled_check(n) and disabled_n < disabled_buf.len) {
+                disabled_buf[disabled_n] = try sh.gpa.dupe(u8, n);
+                disabled_n += 1;
+            }
+        } else {
+            var k: usize = 0;
+            while (k < disabled_n) {
+                if (std.mem.eql(u8, disabled_buf[k], n)) {
+                    disabled_buf[k] = disabled_buf[disabled_n - 1];
+                    disabled_n -= 1;
+                } else k += 1;
+            }
+        }
+    }
+    return status;
 }
 
 fn bi_caller(sh: *Shell, argv: []const []const u8) Err!u8 {
-    _ = argv;
-    if (sh.frames.items.len == 0) return 1;
+        if (sh.frames.items.len == 0) return 1;
     const fr = sh.frames.items[sh.frames.items.len - 1];
-    _ = sh.outf("{d} {s} {s}\n", .{ fr.call_line, if (sh.frames.items.len > 1) sh.frames.items[sh.frames.items.len - 2].func.name else "main", fr.call_file });
+    if (argv.len > 1) {
+        _ = sh.outf("{d} {s} {s}\n", .{ fr.call_line, if (sh.frames.items.len > 1) sh.frames.items[sh.frames.items.len - 2].func.name else "main", fr.call_file });
+    } else _ = sh.outf("{d} {s}\n", .{ fr.call_line, fr.call_file });
     return 0;
 }
 

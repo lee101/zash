@@ -105,7 +105,9 @@ const Eval = struct {
             full.appendSlice(sh.sa, self.src) catch {};
         } else render(sh, self.root, &full) catch {};
         var t: std.ArrayList(u8) = .empty;
-        render(sh, tok, &t) catch {};
+        var tn = tok;
+        while (tn.* == .unary) tn = tn.unary.operand;
+        render(sh, tn, &t) catch {};
         switch (self.ctx) {
             .expansion => sh.msg("{s}: " ++ what ++ " (error token is \"{s}\")", .{ full.items, t.items }),
             .command => sh.msg("((: {s}: " ++ what ++ " (error token is \"{s}\")", .{ full.items, t.items }),
@@ -147,8 +149,8 @@ const Eval = struct {
         if (std.mem.eql(u8, v.name, "RANDOM") or std.mem.eql(u8, v.name, "LINENO")) return null;
         if (sh.opt(.nounset) and v.name.len > 0) {
             sh.msg("{s}: unbound variable", .{v.name});
-            sh.status = 127;
-            return error.Abort;
+            sh.status = if (sh.dash_c) 127 else 1;
+            return error.Exit;
         }
         return null;
     }
@@ -185,10 +187,20 @@ const Eval = struct {
             },
             .invalid => |i| {
                 const sh = self.sh;
+                var msg_text: []const u8 = i.msg;
+                const tail = "(error token is \"\")";
+                if (std.mem.endsWith(u8, msg_text, tail)) {
+                    const trimmed = std.mem.trimEnd(u8, i.expr, " \t\n");
+                    var k = trimmed.len;
+                    while (k > 0 and std.mem.findScalar(u8, "+-*/%&|^<>=!?:~,", trimmed[k - 1]) != null) k -= 1;
+                    if (k < trimmed.len) {
+                        msg_text = std.fmt.allocPrint(sh.sa, "{s}(error token is \"{s}\")", .{ msg_text[0 .. msg_text.len - tail.len], trimmed[k..] }) catch msg_text;
+                    }
+                }
                 switch (self.ctx) {
-                    .expansion => sh.msg("{s}: {s}", .{ i.expr, i.msg }),
-                    .command => sh.msg("((: {s}: {s}", .{ i.expr, i.msg }),
-                    .let => sh.msg("let: {s}: {s}", .{ i.expr, i.msg }),
+                    .expansion => sh.msg("{s}: {s}", .{ i.expr, msg_text }),
+                    .command => sh.msg("((: {s}: {s}", .{ i.expr, msg_text }),
+                    .let => sh.msg("let: {s}: {s}", .{ i.expr, msg_text }),
                 }
                 return error.ArithError;
             },

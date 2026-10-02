@@ -155,7 +155,7 @@ fn apply_one(sh: *Shell, r: ast.Redirect, scope: ?*Scope) Err!bool {
             const word = try expand.word_string(sh, r.target);
             if (std.mem.eql(u8, word, "-")) {
                 if (named) {
-                    const v = sh.get_scalar(r.fd.named) orelse return true;
+                    const v = (try expand.get_var_text(sh, r.fd.named)) orelse return true;
                     const n = parse_fd_num(v) orelse return true;
                     _ = sys.close(n);
                     return true;
@@ -241,6 +241,9 @@ fn expand_source(sh: *Shell, w: ast.Word) Err![]const u8 {
 }
 
 fn assign_named(sh: *Shell, name: []const u8, txt: []const u8) Err!void {
+    if (std.mem.findScalar(u8, name, '[')) |lb| {
+        if (name[name.len - 1] == ']') return sh.assign_elem_text(name[0..lb], name[lb + 1 .. name.len - 1], txt, false);
+    }
     try sh.assign_scalar(name, txt, false);
 }
 

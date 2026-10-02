@@ -63,7 +63,7 @@ fn walk_all(sh: *Shell, a: Allocator, base: []const u8, depth: u32, out: *std.Ar
     _ = try read_dir(a, base, &entries);
     for (entries.items) |e| {
         if (std.mem.eql(u8, e.name, ".") or std.mem.eql(u8, e.name, "..")) continue;
-        if (e.name[0] == '.' and !sh.shopt(.dotglob)) continue;
+        if (e.name[0] == '.' and !dotglob_eff(sh)) continue;
         const full = try join(a, base, e.name);
         if (e.is_dir) {
             const st = sys.stat_path(full, false);
@@ -80,12 +80,23 @@ fn walk_dirs(sh: *Shell, a: Allocator, base: []const u8, depth: u32, out: *std.A
     for (entries.items) |e| {
         if (!e.is_dir) continue;
         if (std.mem.eql(u8, e.name, ".") or std.mem.eql(u8, e.name, "..")) continue;
-        if (e.name[0] == '.' and !sh.shopt(.dotglob)) continue;
+        if (e.name[0] == '.' and !dotglob_eff(sh)) continue;
         const full = try join(a, base, e.name);
         const st = sys.stat_path(full, false);
         try out.append(a, full);
         if (st != null and !st.?.is_link()) try walk_dirs(sh, a, full, depth + 1, out);
     }
+}
+
+fn globignore(sh: *Shell) ?[]const u8 {
+    const v = sh.vars.get("GLOBIGNORE") orelse return null;
+    const s = sh.scalar_of(v) orelse return null;
+    if (s.len == 0) return null;
+    return s;
+}
+
+fn dotglob_eff(sh: *Shell) bool {
+    return sh.shopts[@intFromEnum(shell.Shopt.dotglob)] or globignore(sh) != null;
 }
 
 fn lessThan(_: void, x: []const u8, y: []const u8) bool {
@@ -105,7 +116,7 @@ pub fn expand(sh: *Shell, pat: []const u8, out: *std.ArrayList([]const u8)) Err!
     const trailing_slash = comps.items.len > 1 and comps.items[comps.items.len - 1].len == 0;
     var n_comps = comps.items.len;
     if (trailing_slash) n_comps -= 1;
-    const o: pattern.Opts = .{ .extglob = sh.shopt(.extglob), .nocase = sh.shopt(.nocaseglob), .dot_literal = !sh.shopt(.dotglob) };
+    const o: pattern.Opts = .{ .extglob = sh.shopt(.extglob), .nocase = sh.shopt(.nocaseglob), .dot_literal = !dotglob_eff(sh) };
     var ci: usize = first;
     while (ci < n_comps) : (ci += 1) {
         const comp = comps.items[ci];
@@ -114,7 +125,9 @@ pub fn expand(sh: *Shell, pat: []const u8, out: *std.ArrayList([]const u8)) Err!
         var next: std.ArrayList([]const u8) = .empty;
         for (results.items) |base| {
             if (sh.shopt(.globstar) and std.mem.eql(u8, comp, "**")) {
-                try next.append(a, base);
+                if (is_last) {
+                    if (base.len > 0) try next.append(a, try std.mem.concat(a, u8, &.{ base, "/" }));
+                } else try next.append(a, base);
                 if (is_last) {
                     var all: std.ArrayList([]const u8) = .empty;
                     try walk_all(sh, a, base, 0, &all);
@@ -142,12 +155,12 @@ pub fn expand(sh: *Shell, pat: []const u8, out: *std.ArrayList([]const u8)) Err!
             var matched: std.ArrayList([]const u8) = .empty;
             const explicit_dot = comp[0] == '.' or (comp.len > 1 and comp[0] == '\\' and comp[1] == '.');
             for (entries.items) |e| {
-                if (e.name[0] == '.' and !explicit_dot and !sh.shopt(.dotglob)) continue;
-                if (sh.shopt(.dotglob) and !explicit_dot and (std.mem.eql(u8, e.name, ".") or std.mem.eql(u8, e.name, ".."))) continue;
+                if (e.name[0] == '.' and !explicit_dot and !dotglob_eff(sh)) continue;
+                if (dotglob_eff(sh) and !explicit_dot and (std.mem.eql(u8, e.name, ".") or std.mem.eql(u8, e.name, ".."))) continue;
                 if (!is_last and !e.is_dir) continue;
                 if (trailing_slash and is_last and !e.is_dir) continue;
                 var oo = o;
-                oo.dot_literal = !sh.shopt(.dotglob) and e.name[0] == '.';
+                oo.dot_literal = !dotglob_eff(sh) and e.name[0] == '.';
                 if (e.name[0] == '.' and explicit_dot) oo.dot_literal = false;
                 if (pattern.match(a, comp, e.name, oo)) try matched.append(a, try join(a, base, e.name));
             }
@@ -158,8 +171,22 @@ pub fn expand(sh: *Shell, pat: []const u8, out: *std.ArrayList([]const u8)) Err!
         if (results.items.len == 0) return;
     }
     std.mem.sort([]const u8, results.items, {}, lessThan);
+    const gi = globignore(sh);
     for (results.items) |r| {
         if (r.len == 0) continue;
+        if (gi) |ign| {
+            var skip = false;
+            var it = std.mem.splitScalar(u8, ign, ':');
+            while (it.next()) |p| {
+                if (p.len > 0 and pattern.match(a, p, r, .{ .extglob = true })) {
+                    skip = true;
+                    break;
+                }
+            }
+            const base_name = if (std.mem.findScalarLast(u8, r, '/')) |sl| r[sl + 1 ..] else r;
+            if (std.mem.eql(u8, base_name, ".") or std.mem.eql(u8, base_name, "..")) skip = true;
+            if (skip) continue;
+        }
         if (trailing_slash and r[r.len - 1] != '/') {
             try out.append(a, try std.mem.concat(a, u8, &.{ r, "/" }));
         } else try out.append(a, r);

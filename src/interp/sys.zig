@@ -69,6 +69,7 @@ pub extern "c" fn umask(mode: c_uint) c_uint;
 pub extern "c" fn isatty(fd: c_int) c_int;
 pub extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 pub extern "c" fn strerror(e: c_int) [*:0]const u8;
+pub extern "c" fn strsignal(sig: c_int) [*:0]const u8;
 pub extern "c" fn __errno_location() *c_int;
 pub extern "c" fn getuid() c_uint;
 pub extern "c" fn geteuid() c_uint;

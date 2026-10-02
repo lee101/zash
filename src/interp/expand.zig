@@ -7,6 +7,7 @@ const glob = @import("glob.zig");
 const arith = @import("arith.zig");
 const strutil = @import("strutil.zig");
 const exec = @import("exec.zig");
+const unparse = @import("unparse.zig");
 const Shell = shell.Shell;
 const Err = shell.Err;
 const Allocator = std.mem.Allocator;
@@ -585,6 +586,11 @@ fn virtual_array(sh: *Shell, name: []const u8) Err!?[]const []const u8 {
         try l.append(a, "0");
         return l.items;
     }
+    if (std.mem.eql(u8, name, "PIPESTATUS")) {
+        var l: std.ArrayList([]const u8) = .empty;
+        for (sh.pipestatus[0..sh.pipestatus_len]) |s| try l.append(a, try sh.tmp_fmt("{d}", .{s}));
+        return l.items;
+    }
     if (std.mem.eql(u8, name, "DIRSTACK")) {
         var l: std.ArrayList([]const u8) = .empty;
         try l.append(a, sh.get_or_empty("PWD"));
@@ -634,6 +640,11 @@ pub fn lookup_base(sh: *Shell, name: []const u8, sub: ?ast.Subscript) Err!Val {
                 return .{ .set = sh.pos.items.len > 0, .list = positional_list(sh), .star = name[0] == '*', .positional = true };
             }
             return special_value(sh, name);
+        }
+        if (std.mem.eql(u8, name, "BASH_SUBSHELL")) return .{ .set = true, .s = try sh.tmp_fmt("{d}", .{sh.subshell_level}) };
+        if (std.mem.eql(u8, name, "BASH_COMMAND")) {
+            const c = sh.cur_cmd orelse return .{ .set = true, .s = "" };
+            return .{ .set = true, .s = try unparse.command_source(sh, c) };
         }
         if (try virtual_array(sh, name)) |l| {
             if (l.len == 0) return .{};
@@ -1080,7 +1091,13 @@ fn trim(sh: *Shell, s: []const u8, pat: []const u8, kind: ast.TrimKind) Err![]co
 
 fn replace(sh: *Shell, s: []const u8, pat: []const u8, rep: []const u8, kind: ast.ReplaceKind) Err![]const u8 {
     const a = sh.sa;
-    if (pat.len == 0) return s;
+    if (pat.len == 0) {
+        switch (kind) {
+            .prefix => return std.mem.concat(a, u8, &.{ rep, s }),
+            .suffix => return std.mem.concat(a, u8, &.{ s, rep }),
+            else => return s,
+        }
+    }
     const o = match_opts(sh);
     var out: std.ArrayList(u8) = .empty;
     const literal = !pattern.has_meta(pat, true);
@@ -1314,17 +1331,20 @@ fn transform(sh: *Shell, c: u8, s: []const u8, name: []const u8, has_sub: bool) 
         },
         'A' => {
             if (sh.find(name)) |v| {
-                try out.appendSlice(a, "declare -");
-                if (v.value == .indexed) try out.append(a, 'a');
-                if (v.value == .assoc) try out.append(a, 'A');
-                if (v.flags.integer) try out.append(a, 'i');
-                if (v.flags.lower) try out.append(a, 'l');
-                if (v.flags.nameref) try out.append(a, 'n');
-                if (v.flags.readonly) try out.append(a, 'r');
-                if (v.flags.upper) try out.append(a, 'u');
-                if (v.flags.exported) try out.append(a, 'x');
-                if (out.items[out.items.len - 1] == '-') try out.append(a, '-');
-                try out.append(a, ' ');
+                var attrs: std.ArrayList(u8) = .empty;
+                if (v.value == .indexed) try attrs.append(a, 'a');
+                if (v.value == .assoc) try attrs.append(a, 'A');
+                if (v.flags.integer) try attrs.append(a, 'i');
+                if (v.flags.lower) try attrs.append(a, 'l');
+                if (v.flags.nameref) try attrs.append(a, 'n');
+                if (v.flags.readonly) try attrs.append(a, 'r');
+                if (v.flags.upper) try attrs.append(a, 'u');
+                if (v.flags.exported) try attrs.append(a, 'x');
+                if (attrs.items.len > 0) {
+                    try out.appendSlice(a, "declare -");
+                    try out.appendSlice(a, attrs.items);
+                    try out.append(a, ' ');
+                }
                 try out.appendSlice(a, name);
                 if (!has_sub) {
                     try out.append(a, '=');
@@ -1347,4 +1367,25 @@ pub fn heredoc_string(sh: *Shell, body: ast.Word) Err![]const u8 {
 
 pub fn dollar_at_list(sh: *Shell) []const []const u8 {
     return positional_list(sh);
+}
+
+pub fn get_var_text(sh: *Shell, text: []const u8) Err!?[]const u8 {
+    if (std.mem.findScalar(u8, text, '[')) |lb| {
+        if (text[text.len - 1] == ']') {
+            const name = text[0..lb];
+            const sub = text[lb + 1 .. text.len - 1];
+            const v = sh.find(name) orelse return null;
+            switch (v.value) {
+                .assoc => |*m| return m.get(sub),
+                .indexed => |*ix| {
+                    var idx = try sh.eval_int(sub);
+                    if (idx < 0) idx += ix.max_index() + 1;
+                    return ix.get(idx);
+                },
+                .str => |s| return if ((try sh.eval_int(sub)) == 0) s else null,
+                .none => return null,
+            }
+        }
+    }
+    return sh.get_scalar(text);
 }

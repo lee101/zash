@@ -126,6 +126,7 @@ pub const Frame = struct {
     locals: std.ArrayList(Saved) = .empty,
     saved_file: []const u8,
     saved_ret_status: u8 = 0,
+    is_source: bool = false,
     loop_depth: u32 = 0,
 };
 
@@ -145,6 +146,7 @@ pub const TrapKind = enum { none, ignore, cmd };
 pub const Trap = struct {
     kind: TrapKind = .none,
     cmd: []const u8 = "",
+    inherited: bool = false,
 };
 
 pub const nsig = 65;
@@ -238,6 +240,11 @@ pub const Shell = struct {
     ctl_n: u32 = 0,
     cmdsub_status: ?u8 = null,
     cur_command: []const []const u8 = &.{},
+    cur_cmd: ?*const ast.Command = null,
+    cwd_logical: []u8 = &.{},
+    alias_depth: u32 = 0,
+    pending_funcs: std.StringHashMapUnmanaged([]u8) = .empty,
+    env_funcs_gen: u32 = 0,
     bash_command: []const u8 = "",
     last_arg_buf: []u8 = &.{},
     hash_path: []u8 = &.{},
@@ -358,8 +365,19 @@ pub const Shell = struct {
         _ = sys.write_all(2, w.items);
     }
 
+    pub fn has_func_frame(self: *const Shell) bool {
+        for (self.frames.items) |f| if (!f.is_source) return true;
+        return false;
+    }
+
+    pub fn set_cwd_logical(self: *Shell, p: []const u8) Err!void {
+        const c = try self.gpa.dupe(u8, p);
+        if (self.cwd_logical.len > 0) self.gpa.free(self.cwd_logical);
+        self.cwd_logical = c;
+    }
+
     pub fn xtrace_level(self: *const Shell) u32 {
-        return self.subshell_level + 1;
+        return self.cmdsub_depth + 1;
     }
 
     pub fn set_pos_args(self: *Shell, args: []const []const u8) Err!void {
@@ -396,11 +414,14 @@ pub const Shell = struct {
             };
             if (target.len == 0) return v;
             if (std.mem.findScalar(u8, target, '[') != null) return v;
-            const nv = self.vars.get(target) orelse return v;
-            if (nv == v) return v;
+            const nv = self.vars.get(target) orelse return null;
+            if (nv == v) return null;
             v = nv;
             n += 1;
-            if (n > 16) return v;
+            if (n > 8) {
+                self.msg("warning: {s}: circular name reference", .{name});
+                return null;
+            }
         }
         return v;
     }
@@ -605,11 +626,16 @@ pub const Shell = struct {
 
     pub fn assign_assoc(self: *Shell, v: *Var, key: []const u8, value: []const u8, append: bool) Err!void {
         var val = value;
-        if (append) {
-            const cur = v.value.assoc.get(key) orelse "";
-            const joined = try self.sa.alloc(u8, cur.len + value.len);
-            @memcpy(joined[0..cur.len], cur);
-            @memcpy(joined[cur.len..], value);
+        const cur = v.value.assoc.get(key);
+        if (v.flags.integer) {
+            if (append) {
+                val = try self.tmp_fmt("{d}", .{(try self.eval_int(cur orelse "0")) +% (try self.eval_int(value))});
+            } else val = try self.tmp_fmt("{d}", .{try self.eval_int(value)});
+        } else if (append) {
+            const c = cur orelse "";
+            const joined = try self.sa.alloc(u8, c.len + value.len);
+            @memcpy(joined[0..c.len], c);
+            @memcpy(joined[c.len..], value);
             val = joined;
         }
         val = try self.apply_case(v, val);

@@ -229,7 +229,7 @@ pub fn run(sh: *Shell, kind: Kind, items: []const exec.DeclItem) Err!u8 {
         }
     }
     const rest = items[i..];
-    if (kind == .local and sh.frames.items.len == 0) {
+    if (kind == .local and !sh.has_func_frame()) {
         sh.bmsg(name, "can only be used in a function", .{});
         return 1;
     }
@@ -446,11 +446,10 @@ fn apply_one(sh: *Shell, name: []const u8, kind: Kind, fl: Flags, it: exec.DeclI
             if (sh.vars.get(vname)) |direct| v = direct;
         }
     }
-    if (v.flags.readonly and (it == .assign or fl.r == null or fl.r == false or fl.x != null or fl.i != null)) {
-        if (!(kind == .readonly and it == .arg)) {
-            sh.bmsg(name, "{s}: readonly variable", .{vname});
-            return 1;
-        }
+    const attr_change = fl.i != null or fl.l != null or fl.u != null or fl.c != null or fl.n != null or fl.a or fl.A or fl.t != null or (fl.r != null and !fl.r.?);
+    if (v.flags.readonly and (it == .assign or attr_change)) {
+        sh.bmsg(name, "{s}: readonly variable", .{vname});
+        return 1;
     }
     if (fl.a and v.value == .assoc) {
         sh.bmsg(name, "{s}: cannot convert associative to indexed array", .{vname});

@@ -33,12 +33,49 @@ pub fn set_last_arg(sh: *Shell, s: []const u8) void {
     sh.last_arg = sh.last_arg_buf[0..s.len];
 }
 
-pub fn run_top(sh: *Shell, list: ast.List) Err!u8 {
+fn is_blank_or_comment(l: []const u8) bool {
+    const t = std.mem.trim(u8, l, " \t\r");
+    return t.len == 0 or t[0] == '#';
+}
+
+fn verbose_echo(sh: *Shell, src: []const u8, list: ast.List, idx: usize, next_line: *u32) void {
+    const item = list.items[idx];
+    var end_line: u32 = 0;
+    if (idx + 1 < list.items.len and list.items[idx + 1].line > item.line) {
+        end_line = list.items[idx + 1].line - 1;
+    } else if (idx + 1 < list.items.len) {
+        return;
+    } else {
+        end_line = @intCast(std.mem.count(u8, src, "\n") + 1);
+    }
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, src, '\n');
+    while (it.next()) |l| lines.append(sh.sa, l) catch return;
+    if (lines.items.len > 0 and lines.items[lines.items.len - 1].len == 0) _ = lines.pop();
+    var e = @min(@as(usize, end_line), lines.items.len);
+    while (e > item.line and is_blank_or_comment(lines.items[e - 1])) e -= 1;
+    var l: usize = @max(next_line.*, 1);
+    var out: std.ArrayList(u8) = .empty;
+    while (l <= e) : (l += 1) {
+        out.appendSlice(sh.sa, lines.items[l - 1]) catch return;
+        out.append(sh.sa, '\n') catch return;
+    }
+    next_line.* = @intCast(e + 1);
+    if (out.items.len > 0) _ = sys.write_all(2, out.items);
+}
+
+pub fn run_top(sh: *Shell, list: ast.List, src: []const u8) Err!u8 {
     var status: u8 = sh.status;
     var skip_line: u32 = 0;
-    for (list.items) |item| {
+    var next_line: u32 = 1;
+    for (list.items, 0..) |item, idx| {
         if (skip_line != 0 and item.line == skip_line) continue;
         skip_line = 0;
+        const m = sh.scratch.mark();
+        if (sh.opt(.verbose)) verbose_echo(sh, src, list, idx, &next_line) else if (idx + 1 < list.items.len) {
+            if (list.items[idx + 1].line > item.line) next_line = list.items[idx + 1].line;
+        }
+        sh.scratch.release(m);
         status = run_item(sh, item) catch |e| switch (e) {
             error.Abort => {
                 skip_line = item.line;
@@ -66,6 +103,7 @@ fn pending_check(_: *Shell) bool {
 }
 
 fn run_item(sh: *Shell, item: ast.Item) Err!u8 {
+    if (sh.opt(.noexec)) return 0;
     if (item.background) return run_background(sh, item);
     return run_and_or(sh, item.and_or);
 }
@@ -91,12 +129,12 @@ fn run_pipeline_ign(sh: *Shell, p: ast.Pipeline, ignore: bool) Err!u8 {
 
 pub fn errexit_check(sh: *Shell, status: u8) Err!void {
     if (status == 0 or sh.noerrexit > 0) return;
-    if (sh.trap_err.kind == .cmd and !sh.in_err_trap) {
+    if (sh.trap_err.kind == .cmd and !sh.trap_err.inherited and !sh.in_err_trap) {
         sh.in_err_trap = true;
         defer sh.in_err_trap = false;
         const saved = sh.status;
         sh.status = status;
-        try run_trap_text(sh, sh.trap_err.cmd);
+        try run_trap_text(sh, sh.trap_err.cmd, sh.lineno -| 1);
         sh.status = saved;
     }
     if (sh.opt(.errexit)) {
@@ -123,7 +161,7 @@ fn run_pipeline(sh: *Shell, p: ast.Pipeline) Err!u8 {
         const c = &p.commands[0];
         status = try run_command(sh, c, false);
         switch (c.body) {
-            .simple, .subshell => {
+            .simple, .subshell, .arith_cmd, .cond => {
                 const one = [_]u8{status};
                 set_pipestatus(sh, &one);
             },
@@ -132,7 +170,7 @@ fn run_pipeline(sh: *Shell, p: ast.Pipeline) Err!u8 {
         if (!p.negate) {
             sh.status = status;
             switch (c.body) {
-                .simple, .subshell => try errexit_check(sh, status),
+                .simple, .subshell, .arith_cmd, .cond => try errexit_check(sh, status),
                 else => {},
             }
         }
@@ -150,6 +188,26 @@ fn run_pipeline(sh: *Shell, p: ast.Pipeline) Err!u8 {
     return status;
 }
 
+fn fmt_time(out: *std.ArrayList(u8), a: std.mem.Allocator, secs: f64, prec: u32, long: bool) !void {
+    const p: u32 = @min(prec, 3);
+    if (long) {
+        const mins: u64 = @intFromFloat(secs / 60.0);
+        const rem = secs - @as(f64, @floatFromInt(mins)) * 60.0;
+        try out.print(a, "{d}m", .{mins});
+        try print_fixed(out, a, rem, p);
+        try out.append(a, 's');
+    } else try print_fixed(out, a, secs, p);
+}
+
+fn print_fixed(out: *std.ArrayList(u8), a: std.mem.Allocator, v: f64, p: u32) !void {
+    switch (p) {
+        0 => try out.print(a, "{d:.0}", .{v}),
+        1 => try out.print(a, "{d:.1}", .{v}),
+        2 => try out.print(a, "{d:.2}", .{v}),
+        else => try out.print(a, "{d:.3}", .{v}),
+    }
+}
+
 fn run_timed(sh: *Shell, p: ast.Pipeline) Err!u8 {
     const t0 = sys.mono_ns();
     var tms0: sys.Tms = undefined;
@@ -164,18 +222,52 @@ fn run_timed(sh: *Shell, p: ast.Pipeline) Err!u8 {
     const hz: f64 = 100.0;
     const ut = @as(f64, @floatFromInt(tms1.cutime - tms0.cutime + tms1.utime - tms0.utime)) / hz;
     const stt = @as(f64, @floatFromInt(tms1.cstime - tms0.cstime + tms1.stime - tms0.stime)) / hz;
-    if (p.time == .time_posix) {
-        sh.msg_raw("real {d:.2}\nuser {d:.2}\nsys {d:.2}\n", .{ el, ut, stt });
-    } else {
-        const fmt_s = sh.get_scalar("TIMEFORMAT");
-        if (fmt_s) |f| {
-            _ = f;
+    var fmt_text: []const u8 = "\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS";
+    if (p.time == .time_posix) fmt_text = "real %2R\nuser %2U\nsys %2S";
+    if (p.time != .time_posix) {
+        if (sh.vars.get("TIMEFORMAT")) |v| {
+            if (sh.scalar_of(v)) |s| fmt_text = s;
         }
-        const m1: u64 = @intFromFloat(el / 60.0);
-        const m2: u64 = @intFromFloat(ut / 60.0);
-        const m3: u64 = @intFromFloat(stt / 60.0);
-        sh.msg_raw("\nreal\t{d}m{d:.3}s\nuser\t{d}m{d:.3}s\nsys\t{d}m{d:.3}s\n", .{ m1, el - @as(f64, @floatFromInt(m1)) * 60.0, m2, ut - @as(f64, @floatFromInt(m2)) * 60.0, m3, stt - @as(f64, @floatFromInt(m3)) * 60.0 });
     }
+    if (fmt_text.len == 0) return st;
+    var out: std.ArrayList(u8) = .empty;
+    const a = sh.sa;
+    var i: usize = 0;
+    while (i < fmt_text.len) : (i += 1) {
+        const c = fmt_text[i];
+        if (c != '%' or i + 1 >= fmt_text.len) {
+            try out.append(a, c);
+            continue;
+        }
+        i += 1;
+        var prec: u32 = 3;
+        var long = false;
+        if (std.ascii.isDigit(fmt_text[i])) {
+            prec = fmt_text[i] - '0';
+            i += 1;
+        }
+        if (i < fmt_text.len and fmt_text[i] == 'l') {
+            long = true;
+            i += 1;
+        }
+        if (i >= fmt_text.len) break;
+        switch (fmt_text[i]) {
+            'R' => try fmt_time(&out, a, el, prec, long),
+            'U' => try fmt_time(&out, a, ut, prec, long),
+            'S' => try fmt_time(&out, a, stt, prec, long),
+            'P' => {
+                const pct = if (el > 0) (ut + stt) / el * 100.0 else 0.0;
+                try out.print(a, "{d:.2}", .{pct});
+            },
+            '%' => try out.append(a, '%'),
+            else => {
+                try out.append(a, '%');
+                try out.append(a, fmt_text[i]);
+            },
+        }
+    }
+    try out.append(a, '\n');
+    _ = sys.write_all(2, out.items);
     return st;
 }
 
@@ -266,7 +358,7 @@ fn run_multi(sh: *Shell, p: ast.Pipeline) Err!u8 {
     return result;
 }
 
-pub fn wait_pid(sh: *Shell, pid: c_int) u8 {
+pub fn wait_raw(sh: *Shell, pid: c_int) ?c_int {
     var st: c_int = 0;
     while (true) {
         const r = sys.waitpid(pid, &st, 0);
@@ -275,9 +367,27 @@ pub fn wait_pid(sh: *Shell, pid: c_int) u8 {
                 check_signals(sh) catch {};
                 continue;
             }
-            return 127;
+            return null;
         }
         break;
+    }
+    return st;
+}
+
+pub fn wait_pid(sh: *Shell, pid: c_int) u8 {
+    const st = wait_raw(sh, pid) orelse return 127;
+    return sys.status_code(st);
+}
+
+pub fn wait_report(sh: *Shell, pid: c_int) u8 {
+    const st = wait_raw(sh, pid) orelse return 127;
+    if (sys.wifsignaled(st)) {
+        const sig = sys.wtermsig(st);
+        if (sig != sys.SIGINT and sig != sys.SIGPIPE) {
+            var buf: [128]u8 = undefined;
+            const txt = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ std.mem.span(sys.strsignal(sig)), if (st & 0x80 != 0) " (core dumped)" else "" }) catch "";
+            _ = sys.write_all(2, txt);
+        }
     }
     return sys.status_code(st);
 }
@@ -286,7 +396,6 @@ pub fn enter_child(sh: *Shell) void {
     sh.in_subshell = true;
     sh.subshell_level += 1;
     sh.bashpid = sys.getpid();
-    sh.jobs.clearRetainingCapacity();
     reset_traps_for_child(sh);
 }
 
@@ -295,23 +404,23 @@ fn reset_traps_for_child(sh: *Shell) void {
     while (i < shell.nsig) : (i += 1) {
         if (sh.traps[i].kind == .cmd) {
             sys.set_signal(@intCast(i), sys.SIG_DFL);
-            sh.traps[i] = .{};
+            sh.traps[i].inherited = true;
         }
     }
-    sh.trap_exit = .{};
-    sh.trap_err = .{};
-    sh.trap_debug = .{};
-    sh.trap_return = .{};
+    if (sh.trap_exit.kind == .cmd) sh.trap_exit.inherited = true;
+    if (sh.trap_err.kind == .cmd) sh.trap_err.inherited = true;
+    if (sh.trap_debug.kind == .cmd) sh.trap_debug.inherited = true;
+    if (sh.trap_return.kind == .cmd) sh.trap_return.inherited = true;
     shell.pending_signals.store(0, .seq_cst);
 }
 
 pub fn child_exit(sh: *Shell, status: u8) noreturn {
     var st = status;
-    if (sh.trap_exit.kind == .cmd) {
+    if (sh.trap_exit.kind == .cmd and !sh.trap_exit.inherited) {
         const cmd = sh.trap_exit.cmd;
         sh.trap_exit = .{};
         sh.status = st;
-        run_trap_text(sh, cmd) catch {};
+        run_trap_text(sh, cmd, 0) catch {};
         st = sh.status;
         if (sh.exit_status_pending) |x| st = x;
     }
@@ -392,13 +501,24 @@ fn run_subshell(sh: *Shell, l: ast.List) Err!u8 {
     }
     if (pid == 0) {
         enter_child(sh);
-        const st = run_list(sh, l) catch |e| switch (e) {
+        const single = single_simple(l);
+        const st = (if (single) |cmd| run_command(sh, cmd, true) else run_list(sh, l)) catch |e| switch (e) {
             error.OutOfMemory => 1,
             else => sh.status,
         };
         child_exit(sh, st);
     }
-    return wait_pid(sh, pid);
+    return wait_report(sh, pid);
+}
+
+fn single_simple(l: ast.List) ?*const ast.Command {
+    if (l.items.len != 1) return null;
+    const it = l.items[0];
+    if (it.background or it.and_or.rest.len != 0) return null;
+    const p = it.and_or.first;
+    if (p.negate or p.time != .none or p.commands.len != 1) return null;
+    if (p.commands[0].body != .simple) return null;
+    return &p.commands[0];
 }
 
 fn run_cond_list(sh: *Shell, l: ast.List) Err!u8 {
@@ -454,7 +574,15 @@ fn run_while(sh: *Shell, l: ast.Loop) Err!u8 {
     return status;
 }
 
+fn bad_loop_name(sh: *Shell, name: []const u8) Err {
+    sh.msg("`{s}': not a valid identifier", .{name});
+    sh.status = 1;
+    sh.exit_status_pending = 1;
+    return error.Exit;
+}
+
 fn run_for(sh: *Shell, f: ast.ForIn) Err!u8 {
+    if (!Shell.is_valid_name(f.name)) return bad_loop_name(sh, f.name);
     const m = sh.scratch.mark();
     defer sh.scratch.release(m);
     var items: std.ArrayList([]const u8) = .empty;
@@ -514,6 +642,7 @@ fn run_arith_for(sh: *Shell, f: ast.ArithFor) Err!u8 {
 }
 
 fn run_select(sh: *Shell, f: ast.ForIn) Err!u8 {
+    if (!Shell.is_valid_name(f.name)) return bad_loop_name(sh, f.name);
     const m = sh.scratch.mark();
     defer sh.scratch.release(m);
     var items: std.ArrayList([]const u8) = .empty;
@@ -704,7 +833,7 @@ pub fn ps4(sh: *Shell, w: *std.ArrayList(u8)) Err!void {
     }
     if (text.len > 0) {
         var lvl: u32 = 0;
-        while (lvl < sh.xtrace_level()) : (lvl += 1) try w.append(sh.sa, text[0]);
+        while (lvl + 1 < sh.xtrace_level()) : (lvl += 1) try w.append(sh.sa, text[0]);
     }
     try w.appendSlice(sh.sa, text);
 }
@@ -752,6 +881,46 @@ fn xtrace_simple(sh: *Shell, s: ast.Simple, argv: []const []const u8, assign_val
     }
     try w.append(sh.sa, '\n');
     _ = sys.write_all(2, w.items);
+}
+
+fn plain_lit(w: ast.Word) ?[]const u8 {
+    if (w.parts.len == 1) switch (w.parts[0]) {
+        .lit => |t| return t,
+        else => {},
+    };
+    return null;
+}
+
+fn alias_text(sh: *Shell, c: *const ast.Command, s: ast.Simple) Err!?[]const u8 {
+    for (c.redirs) |r| switch (r.op) {
+        .heredoc, .heredoc_strip => return null,
+        else => {},
+    };
+    const first = plain_lit(s.words[0]) orelse return null;
+    var value = sh.aliases.get(first) orelse return null;
+    var w: unparse.W = .{ .sh = sh, .a = sh.sa };
+    if (s.assigns.len > 0) {
+        try w.simple(.{ .assigns = s.assigns, .words = &.{} });
+        try w.put(" ");
+    }
+    try w.put(value);
+    var wi: usize = 1;
+    while (value.len > 0 and (value[value.len - 1] == ' ' or value[value.len - 1] == '\t') and wi < s.words.len) {
+        const nxt = plain_lit(s.words[wi]) orelse break;
+        const v2 = sh.aliases.get(nxt) orelse break;
+        try w.put(v2);
+        value = v2;
+        wi += 1;
+    }
+    while (wi < s.words.len) : (wi += 1) {
+        try w.put(" ");
+        try w.word(s.words[wi]);
+    }
+    for (c.redirs) |r| {
+        try w.put(" ");
+        try w.redir(r);
+    }
+    return w.out.items;
 }
 
 fn is_decl_name(name: []const u8) bool {
@@ -870,6 +1039,14 @@ fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final: bool) Err
     const m = sh.scratch.mark();
     defer sh.scratch.release(m);
     sh.cmdsub_status = null;
+    if (sh.alias_depth < 16 and s.words.len > 0 and sh.aliases.count() > 0 and sh.shopt(.expand_aliases)) {
+        if (try alias_text(sh, c, s)) |txt| {
+            sh.alias_depth += 1;
+            defer sh.alias_depth -= 1;
+            return run_string(sh, txt, .{ .label = "", .line_base = c.line -| 1 });
+        }
+    }
+    if (sh.in_trap == 0 and !sh.in_debug_trap and !sh.in_err_trap) sh.cur_cmd = c;
     var argv: std.ArrayList([]const u8) = .empty;
     var decl: std.ArrayList(DeclItem) = .empty;
     var decl_mode = false;
@@ -892,7 +1069,7 @@ fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final: bool) Err
             }
         }
     }
-    if (sh.trap_debug.kind == .cmd and !sh.in_debug_trap) try run_debug_trap(sh, c);
+    if (sh.trap_debug.kind == .cmd and !sh.trap_debug.inherited and !sh.in_debug_trap) try run_debug_trap(sh, c);
 
     if (argv.items.len == 0) {
         var avals: std.ArrayList([]const u8) = .empty;
@@ -995,8 +1172,10 @@ pub fn dispatch_ex(sh: *Shell, argv: []const []const u8, decl: []const DeclItem,
 }
 
 fn util_ok(sh: *Shell, name: []const u8) bool {
-    _ = name;
     _ = sh;
+    if (std.mem.eql(u8, name, "head")) {
+        if (sys.lseek(0, 0, 1) >= 0) return false;
+    }
     return true;
 }
 
@@ -1026,8 +1205,14 @@ pub fn call_function(sh: *Shell, f: *const shell.Func, args: []const []const u8)
     sh.cur_file = f.file;
     const saved_loop = sh.loop_depth;
     sh.loop_depth = 0;
-    const saved_noerr = sh.noerrexit;
-    _ = saved_noerr;
+    const saved_trap_debug = sh.trap_debug;
+    const saved_trap_err = sh.trap_err;
+    const saved_trap_return = sh.trap_return;
+    if (!sh.opt(.functrace)) {
+        sh.trap_debug = .{};
+        sh.trap_return = .{};
+    }
+    if (!sh.opt(.errtrace)) sh.trap_err = .{};
     var status: u8 = 0;
     var ret_err: ?Err = null;
     status = run_command(sh, f.body, false) catch |e| blk: {
@@ -1040,6 +1225,16 @@ pub fn call_function(sh: *Shell, f: *const shell.Func, args: []const []const u8)
         }
     };
     sh.loop_depth = saved_loop;
+    if (ret_err == null and sh.trap_return.kind == .cmd and !sh.trap_return.inherited) {
+        sh.status = status;
+        run_trap_text(sh, sh.trap_return.cmd, sh.lineno -| 1) catch |e| {
+            ret_err = e;
+        };
+        status = sh.status;
+    }
+    if (sh.trap_debug.kind == .none) sh.trap_debug = saved_trap_debug;
+    if (sh.trap_err.kind == .none) sh.trap_err = saved_trap_err;
+    if (sh.trap_return.kind == .none) sh.trap_return = saved_trap_return;
     var frame = sh.frames.pop().?;
     sh.pop_locals(&frame);
     frame.saved_pos.deinit(sh.gpa);
@@ -1050,11 +1245,6 @@ pub fn call_function(sh: *Shell, f: *const shell.Func, args: []const []const u8)
     sh.cur_file = saved_file;
     sh.lineno = saved_line;
     if (ret_err) |e| return e;
-    if (sh.trap_return.kind == .cmd and (sh.opt(.functrace))) {
-        sh.status = status;
-        try run_trap_text(sh, sh.trap_return.cmd);
-        status = sh.status;
-    }
     return status;
 }
 
@@ -1179,11 +1369,32 @@ pub fn exec_failed(sh: *Shell, path: []const u8, argv: []const []const u8) u8 {
         return st;
     }
     if (e == sys.ENOENT) {
+        if (shebang_interp(sh, path)) |interp| {
+            sh.msg_raw("{s}: {s}: {s}: bad interpreter: No such file or directory\n", .{ sh.script_name, path, interp });
+            return 126;
+        }
         sh.msg("{s}: {s}", .{ path, "cannot execute: required file not found" });
         return 126;
     }
     sh.msg("{s}: {s}", .{ path, sys.msg_for(e) });
     return if (e == sys.ENOENT) 127 else 126;
+}
+
+fn shebang_interp(sh: *Shell, path: []const u8) ?[]const u8 {
+    var buf: [4096]u8 = undefined;
+    const z = sys.cstr(&buf, path) orelse return null;
+    const fd = sys.open(z, sys.O.RDONLY);
+    if (fd < 0) return null;
+    defer _ = sys.close(fd);
+    var head: [256]u8 = undefined;
+    const n = sys.read_some(fd, &head);
+    if (n < 3 or head[0] != '#' or head[1] != '!') return null;
+    const line = head[2..@intCast(n)];
+    var end: usize = 0;
+    while (end < line.len and line[end] != '\n' and line[end] != ' ' and line[end] != '\t') end += 1;
+    const interp = std.mem.trim(u8, line[0..end], " \t");
+    if (interp.len == 0) return null;
+    return sh.sa.dupe(u8, interp) catch null;
 }
 
 fn run_as_script(sh: *Shell, path: []const u8, argv: []const []const u8) Err!u8 {
@@ -1237,7 +1448,7 @@ fn spawn(sh: *Shell, path: []const u8, argv: []const []const u8, redirs: []const
             const st = exec_failed(sh, path, argv);
             sys._exit(st);
         }
-        return wait_pid(sh, pid);
+        return wait_report(sh, pid);
     }
     if (redirs.len > 0 and !try redir.apply(sh, redirs, null)) return 1;
     child_prepare_exec(sh);
@@ -1450,11 +1661,11 @@ pub fn check_signals(sh: *Shell) Err!void {
     while (sig < 63) : (sig += 1) {
         if ((bits >> sig) & 1 == 0) continue;
         const t = sh.traps[sig];
-        if (t.kind == .cmd) {
+        if (t.kind == .cmd and !t.inherited) {
             const saved = sh.status;
             sh.in_trap += 1;
             defer sh.in_trap -= 1;
-            try run_trap_text(sh, t.cmd);
+            try run_trap_text(sh, t.cmd, 0);
             sh.status = saved;
         }
     }
@@ -1468,11 +1679,11 @@ fn run_debug_trap(sh: *Shell, c: *const ast.Command) Err!void {
     defer sh.scratch.release(m);
     const text = try unparse.command_source(sh, c);
     sh.bash_command = text;
-    try run_trap_text(sh, sh.trap_debug.cmd);
+    try run_trap_text(sh, sh.trap_debug.cmd, c.line -| 1);
     sh.status = saved;
 }
 
-pub fn run_trap_text(sh: *Shell, text: []const u8) Err!void {
+pub fn run_trap_text(sh: *Shell, text: []const u8, line_base: u32) Err!void {
     const saved_file = sh.cur_file;
     const saved_line = sh.lineno;
     defer {
@@ -1480,7 +1691,7 @@ pub fn run_trap_text(sh: *Shell, text: []const u8) Err!void {
         sh.lineno = saved_line;
     }
     const st = sh.status;
-    _ = run_string(sh, text, .{ .label = "", .line_base = 0 }) catch |e| switch (e) {
+    _ = run_string(sh, text, .{ .label = "", .line_base = line_base }) catch |e| switch (e) {
         error.Break, error.Continue => {},
         else => return e,
     };
@@ -1505,7 +1716,8 @@ pub fn run_string(sh: *Shell, src: []const u8, o: StringOpts) Err!u8 {
             sh.keep_arenas.append(sh.gpa, arena) catch {};
         }
     }
-    var p = parser.Parser.init(arena.allocator(), src, .{});
+    const src_copy = try arena.allocator().dupe(u8, src);
+    var p = parser.Parser.init(arena.allocator(), src_copy, .{});
     p.lex.line_base = o.line_base + 1;
     p.lex.cache_line = p.lex.line_base;
     const list = p.parse_script() catch |e| switch (e) {
@@ -1551,7 +1763,8 @@ pub fn run_source_text(sh: *Shell, src: []const u8, file: []const u8, line_base:
             sh.keep_arenas.append(sh.gpa, arena) catch {};
         }
     }
-    var p = parser.Parser.init(arena.allocator(), src, .{});
+    const src_copy = try arena.allocator().dupe(u8, src);
+    var p = parser.Parser.init(arena.allocator(), src_copy, .{});
     p.lex.line_base = line_base + 1;
     p.lex.cache_line = p.lex.line_base;
     const list = p.parse_script() catch |e| switch (e) {
@@ -1562,5 +1775,5 @@ pub fn run_source_text(sh: *Shell, src: []const u8, file: []const u8, line_base:
         },
         error.OutOfMemory => return error.OutOfMemory,
     };
-    return run_top(sh, list);
+    return run_top(sh, list, src_copy);
 }
