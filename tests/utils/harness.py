@@ -203,12 +203,12 @@ def check(name, case, fxdir, stats, verbose=False):
             if a[0] != b[0]:
                 why.append("status gnu=%d zash=%d" % (a[0], b[0]))
             if a[1] != b[1]:
-                why.append("stdout differs gnu=%r zash=%r" % (a[1][:200], b[1][:200]))
+                why.append("stdout differs gnu=%r zash=%r" % (a[1][:80], b[1][:80]))
             if not ok_err:
                 why.append("stderr gnu=%r zash=%r" % (a[2][:300], b[2][:300]))
             if not same_tree:
                 why.append("tree differs")
-            stats.fails.append((case, "; ".join(why) + (" [inbuf=%s]" % inbuf if inbuf else "")))
+            stats.fails.append((case, ("; ".join(why))[:500] + (" [inbuf=%s]" % inbuf if inbuf else "")))
 
 
 def main():
