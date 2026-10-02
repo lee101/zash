@@ -1,0 +1,2 @@
+getopts
+echo "status $?"

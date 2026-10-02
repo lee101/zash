@@ -1,0 +1,3 @@
+echo $BASH_SUBSHELL
+( echo $BASH_SUBSHELL )
+( ( echo $BASH_SUBSHELL ) )

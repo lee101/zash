@@ -1,0 +1,5 @@
+-v
+-o
+result.txt
+a.c
+b.c

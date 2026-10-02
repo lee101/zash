@@ -1,0 +1,2 @@
+case x in a) echo a;; esac
+echo $?

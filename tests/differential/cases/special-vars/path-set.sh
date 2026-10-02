@@ -1,0 +1,1 @@
+[ -n "$PATH" ] && echo set

@@ -1,0 +1,2 @@
+printf 'no newline'
+echo

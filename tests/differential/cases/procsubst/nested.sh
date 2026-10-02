@@ -1,0 +1,1 @@
+cat <(cat <(echo inner))

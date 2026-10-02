@@ -1,0 +1,2 @@
+V=temp :
+echo "[$V]"

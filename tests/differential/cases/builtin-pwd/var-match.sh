@@ -1,0 +1,1 @@
+[ "$(pwd)" = "$PWD" ] && echo same

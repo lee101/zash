@@ -1,0 +1,5 @@
+IFS=:
+x="a:b::c:"
+set -- $x
+echo $#
+printf '<%s>\n' "$@"

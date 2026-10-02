@@ -1,0 +1,2 @@
+echo ./*.txt
+echo ./dir/*

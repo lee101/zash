@@ -1,0 +1,1 @@
+echo nonexist/* dir/nonexist*

@@ -1,0 +1,2 @@
+# cat: startup
+type cd

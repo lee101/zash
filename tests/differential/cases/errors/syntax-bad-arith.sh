@@ -1,0 +1,3 @@
+echo before
+echo $((1 +))
+echo after

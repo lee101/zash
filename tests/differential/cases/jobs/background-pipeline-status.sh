@@ -1,0 +1,3 @@
+false | true &
+wait $!
+echo $?

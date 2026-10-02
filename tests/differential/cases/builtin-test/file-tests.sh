@@ -1,0 +1,10 @@
+[ -e a.txt ] && echo e
+[ -f a.txt ] && echo f
+[ -d dir ] && echo d
+[ -s a.txt ] && echo s
+[ -s empty.txt ] || echo notsize
+[ -r a.txt ] && echo r
+[ -w a.txt ] && echo w
+[ -x sh/hello.sh ] && echo x
+[ -L link.txt ] && echo L
+[ -h link.txt ] && echo h

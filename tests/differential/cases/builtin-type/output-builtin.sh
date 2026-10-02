@@ -1,0 +1,2 @@
+type cd
+type echo

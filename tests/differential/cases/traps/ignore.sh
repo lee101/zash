@@ -1,0 +1,2 @@
+trap '' EXIT
+echo done

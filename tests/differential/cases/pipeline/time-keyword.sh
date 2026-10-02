@@ -1,0 +1,2 @@
+TIMEFORMAT=done
+time true

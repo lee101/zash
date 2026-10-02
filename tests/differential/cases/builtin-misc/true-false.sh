@@ -1,0 +1,2 @@
+true; echo $?
+false; echo $?

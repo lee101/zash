@@ -1,0 +1,3 @@
+cat <<$HOME
+x
+$HOME

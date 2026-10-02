@@ -1,0 +1,2 @@
+# Cases expected to fail against zash: one id (category/name) or glob per line, # for comments.
+# Regenerate: tests/differential/run.sh --update-known-failures

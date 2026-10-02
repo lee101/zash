@@ -1,0 +1,2 @@
+v=héllo
+echo ${#v}

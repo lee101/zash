@@ -1,0 +1,2 @@
+echo before
+echo a &&

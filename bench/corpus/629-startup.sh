@@ -1,0 +1,2 @@
+# cat: startup
+echo

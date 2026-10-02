@@ -1,0 +1,2 @@
+( cd dir )
+basename "$PWD"

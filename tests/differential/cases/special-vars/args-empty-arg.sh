@@ -1,0 +1,2 @@
+echo $#
+printf '[%s]' "$@"; echo

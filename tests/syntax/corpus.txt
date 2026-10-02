@@ -1,0 +1,601 @@
+echo hello
+%%
+echo a b c; echo d
+%%
+echo a &
+%%
+a && b || c
+%%
+a | b | c
+%%
+a |& b
+%%
+! a
+%%
+! ! a
+%%
+time a | b
+%%
+time -p a
+%%
+time
+%%
+( a )
+%%
+( a; b )
+%%
+(a;b)
+%%
+{ a; }
+%%
+{ a; b; }
+%%
+{ a
+}
+%%
+if a; then b; fi
+%%
+if a; then b; else c; fi
+%%
+if a; then b; elif c; then d; else e; fi
+%%
+if a
+then b
+fi
+%%
+if a; then
+  b
+elif c; then
+  d
+fi
+%%
+while a; do b; done
+%%
+until a; do b; done
+%%
+while a
+do
+  b
+done
+%%
+for i in 1 2 3; do echo $i; done
+%%
+for i in; do :; done
+%%
+for i; do :; done
+%%
+for i
+do :
+done
+%%
+for i in a b
+do :
+done
+%%
+for ((i=0;i<3;i++)); do echo $i; done
+%%
+for (( ; ; )); do break; done
+%%
+for ((i=0; i<3; i++))
+do
+  echo $i
+done
+%%
+select x in a b c; do echo $x; break; done
+%%
+case x in a) echo a;; b|c) echo bc;; *) echo other;; esac
+%%
+case x in
+  a) echo a ;;
+  (b) echo b ;&
+  c) echo c ;;&
+  *) : ;;
+esac
+%%
+case x in esac
+%%
+case x in a) ;; esac
+%%
+case x in a) echo a esac
+%%
+case $x in "a b"|'c d'|e*f) : ;; esac
+%%
+f() { echo hi; }
+%%
+f () { echo hi; }
+%%
+f() ( echo hi )
+%%
+function f { echo hi; }
+%%
+function f() { echo hi; }
+%%
+function f() if a; then b; fi
+%%
+f() { :; } > /dev/null
+%%
+[[ a == b ]]
+%%
+[[ -f x && -d y || ! -e z ]]
+%%
+[[ $a =~ ^[0-9]+$ ]]
+%%
+[[ ( a == b ) ]]
+%%
+[[ a < b ]]
+%%
+[[ a == @(x|y) ]]
+%%
+[[ -n $x ]] && echo y
+%%
+(( 1 + 2 ))
+%%
+(( x = 5, y = x * 2 ))
+%%
+echo $(( 1 + 2 ))
+%%
+x=$((1+2))
+%%
+a=1
+%%
+a=1 b=2 cmd
+%%
+a=(1 2 3)
+%%
+a+=(4 5)
+%%
+a[1]=x
+%%
+a[1]+=x
+%%
+declare -a arr=(1 2 3)
+%%
+a=
+%%
+a= b
+%%
+cmd > f
+%%
+cmd >> f
+%%
+cmd < f
+%%
+cmd 2> f
+%%
+cmd 2>&1
+%%
+cmd >&2
+%%
+cmd &> f
+%%
+cmd &>> f
+%%
+cmd <<< word
+%%
+cmd <> f
+%%
+cmd >| f
+%%
+cmd {fd}> f
+%%
+cmd 2>&-
+%%
+cmd <&-
+%%
+> f
+%%
+cat <<EOF
+hello
+EOF
+%%
+cat <<-EOF
+	hello
+	EOF
+%%
+cat <<'EOF'
+$x
+EOF
+%%
+cat <<"EOF"
+$x
+EOF
+%%
+cat <<\EOF
+$x
+EOF
+%%
+cat <<EOF1 <<EOF2
+a
+EOF1
+b
+EOF2
+%%
+cat <<EOF | wc
+a
+EOF
+%%
+echo "$(cat <<EOF
+x
+EOF
+)"
+%%
+echo ${x}
+%%
+echo ${x:-y} ${x:=y} ${x:?y} ${x:+y} ${x-y} ${x=y} ${x?y} ${x+y}
+%%
+echo ${#x} ${!x} ${x[@]} ${x[*]} ${#x[@]} ${!x[@]} ${x[1]}
+%%
+echo ${x%y} ${x%%y} ${x#y} ${x##y} ${x/y/z} ${x//y/z} ${x/#y/z} ${x/%y/z}
+%%
+echo ${x^} ${x^^} ${x,} ${x,,} ${x:1} ${x:1:2} ${x: -1} ${x@Q} ${x@E}
+%%
+echo ${!x*} ${!x@}
+%%
+echo $x $1 $@ $* $# $? $- $$ $! $0 ${10}
+%%
+echo $(a) `a`
+%%
+echo $(a $(b))
+%%
+echo "a $(b) `c` $((1+2)) ${d}"
+%%
+echo <(a) >(b)
+%%
+echo {a,b,c}
+%%
+echo {1..10} {a..z} {1..10..2}
+%%
+echo a{b,c}d{e,f}
+%%
+echo ~ ~/x ~root
+%%
+echo a\ b 'c d' "e f"
+%%
+echo $'a\tb'
+%%
+echo $"a"
+%%
+echo a # comment
+%%
+# comment
+echo a
+%%
+echo a \
+b
+%%
+a;b;c
+%%
+a
+b
+c
+%%
+a &
+b &
+%%
+a & b
+%%
+a &&
+b
+%%
+a ||
+b
+%%
+a |
+b
+%%
+echo }
+%%
+echo {
+%%
+echo { a }
+%%
+echo [[ ]]
+%%
+echo a]]
+%%
+echo ((a))
+%%
+echo a
+ 
+%%
+{ echo a; } | { cat; }
+%%
+( a ) | ( b )
+%%
+if a; then b; fi | c
+%%
+while a; do b; done > f
+%%
+for i in 1; do :; done 2>&1 | cat
+%%
+a=1 b=2
+%%
+export A=1 B=2
+%%
+>f cmd
+%%
+cmd >f arg
+%%
+coproc a
+%%
+coproc NAME { a; }
+%%
+coproc { a; }
+%%
+echo *(a)
+%%
+echo @(a|b)
+%%
+echo +(a) ?(b) !(c)
+%%
+echo "unterminated
+%%
+echo 'unterminated
+%%
+echo $(
+%%
+echo `
+%%
+echo ${
+%%
+echo ${a
+%%
+echo $((1+
+%%
+if
+%%
+if a; then
+%%
+if a; then b
+%%
+if a then b fi
+%%
+fi
+%%
+then
+%%
+else
+%%
+elif
+%%
+do
+%%
+done
+%%
+esac
+%%
+}
+%%
+)
+%%
+;;
+%%
+;
+%%
+&
+%%
+&&
+%%
+||
+%%
+|
+%%
+a ||| b
+%%
+a && && b
+%%
+a ; ; b
+%%
+a & & b
+%%
+( )
+%%
+{ }
+%%
+{ ; }
+%%
+if a; then; fi
+%%
+while; do a; done
+%%
+while a; do; done
+%%
+for; do :; done
+%%
+for 1 in a; do :; done
+%%
+for i in a b c
+%%
+for i in a; do
+%%
+case
+%%
+case x
+%%
+case x in
+%%
+case x in a)
+%%
+case x in a) b
+%%
+case x in a b) c;; esac
+%%
+case x in a) c;; b esac
+%%
+f() 
+%%
+f() echo
+%%
+f() { echo
+%%
+function
+%%
+function f
+%%
+function f {
+%%
+[[
+%%
+[[ a
+%%
+[[ a ==
+%%
+[[ a == b
+%%
+[[ a == ]]
+%%
+[[ -f ]]
+%%
+[[ ]]
+%%
+[[ a b ]]
+%%
+[[ ( a ]]
+%%
+[[ a ) ]]
+%%
+(( 1 + 
+%%
+(( 1 +
+%%
+echo >
+%%
+echo <
+%%
+echo >>
+%%
+echo <<
+%%
+echo <<<
+%%
+echo >&
+%%
+echo > ;
+%%
+echo > > f
+%%
+echo a b ) c
+%%
+a ( b )
+%%
+a=1 ( b )
+%%
+echo a;; b
+%%
+a;; 
+%%
+x=( 
+%%
+x=(1 2
+%%
+x=(1 | 2)
+%%
+x=(1;2)
+%%
+echo a=(1 2)
+%%
+a=(1 2) b
+%%
+time ! a
+%%
+! time a
+%%
+a | ! b
+%%
+a | time b
+%%
+echo $
+%%
+echo $$
+%%
+echo "$"
+%%
+echo ${}
+%%
+echo ${@}
+%%
+echo ${1}
+%%
+echo ${!}
+%%
+echo ${#}
+%%
+echo ${#1}
+%%
+echo ${x:}
+%%
+echo ${x:1:}
+%%
+echo ${x/}
+%%
+echo ${x@}
+%%
+echo ${x@Z}
+%%
+echo ${x:-}
+%%
+echo ${x:--}
+%%
+echo ${x:-${y:-z}}
+%%
+echo "${x:-"a b"}"
+%%
+echo ${x:-"a}"}
+%%
+echo ${x//[/]/z}
+%%
+echo ${a[$i]}
+%%
+echo ${a["k"]}
+%%
+echo ${a[i+1]:1:2}
+%%
+echo $((a[1]))
+%%
+echo $((1 ? 2 : 3))
+%%
+echo $((a=1, b=2))
+%%
+echo $((x+=1)) $((x<<=1)) $((x>>=1)) $((x&=1)) $((x^=1)) $((x|=1)) $((x%=2)) $((x/=2)) $((x*=2)) $((x-=1))
+%%
+echo $((2**3**2))
+%%
+echo $((-x)) $((+x)) $((!x)) $((~x))
+%%
+echo $((x++)) $((x--)) $((++x)) $((--x))
+%%
+echo $((0x1f)) $((017)) $((2#101)) $((64#a))
+%%
+echo $((1 +))
+%%
+echo $(( ))
+%%
+echo $(())
+%%
+echo $((a,b))
+%%
+echo $(( (1+2)*3 ))
+%%
+echo $((1<2&&3>2||0))
+%%
+echo $[1+2]
+%%
+echo $((echo a) | cat)
+%%
+echo $( (a) )
+%%
+echo $((a)
+%%
+(( a ))
+%%
+((a))
+%%
+((a)) && b
+%%
+(( ))
+%%
+((echo a); b)
+%%
+(echo a)
+%%
+((a)

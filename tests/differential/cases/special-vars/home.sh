@@ -1,0 +1,1 @@
+[ -n "$HOME" ] && echo set
