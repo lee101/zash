@@ -127,6 +127,28 @@ def fixtures(dst, big=False):
     w("dir/.git/config", b"[core]\n")
     w("code.py", b"import os\n\ndef foo(x):\n    return x + 1\n\nclass Bar:\n    def baz(self):\n        pass\n# TODO: fix\nprint(foo(2))\n")
     w("mixed", b"Apple pie\napple tart\nBanana split\nbanana bread\nCherry\n")
+    w("g1", b"a\nb\nfoo\nc\nd\ne\nfoo2\nf\n")
+    w("g2", b"foo here\nx\nFoo Bar\nfoobar\nbar foo baz\n")
+    w("gnonl", b"alpha\nbeta\nfoo")
+    w("gdense", b"".join(b"foo %d\n" % i if i % 2 else b"bar %d\n" % i for i in range(40)))
+    w("gtext", b"The quick brown fox\njumps over the lazy dog\nfoo_bar baz-qux\nfoo.bar foo-bar\n  indented foo\n\n# comment foo\nTAB\there\nend\n")
+    w("rtree/x.txt", b"foo\n")
+    w("rtree/y.log", b"foo\n")
+    w("rtree/a/z.txt", b"foo\nbar\n")
+    w("rtree/a/b/w.log", b"foo\n")
+    w("rtree/c/v.txt", b"foo\n")
+    w("rtree/.hid/h.txt", b"foo\n")
+    w("rtree/.dot", b"foo\n")
+    w("rtree/bin.dat", b"foo\x00bar\n")
+    try:
+        os.symlink("x.txt", os.path.join(dst, "rtree/lnk.txt"))
+        os.symlink("a", os.path.join(dst, "rtree/lnkdir"))
+    except FileExistsError:
+        pass
+    w("nulbig", b"x\n" * 100000 + b"\x00" + b"y\n" * 10 + b"foo\n")
+    w("nulbig2", b"foo\n" * 30000 + b"a\x00b foo\n" + b"foo\n" * 5)
+    w("utf8mix", "caf\u00e9 foo\nna\u00efve bar\nplain foo\n\u65e5\u672c foo\n".encode())
+    w("invalid8", b"ok foo\nbad \xff foo\nfine foo\n\xc3\x28 foo\n")
     os.makedirs(os.path.join(dst, "emptydir"), exist_ok=True)
     try:
         os.symlink("lines5", os.path.join(dst, "link5"))

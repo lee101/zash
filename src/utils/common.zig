@@ -806,6 +806,223 @@ pub const Input = struct {
     }
 };
 
+pub const GlobOpts = struct { pathname: bool = false, period: bool = false, casefold: bool = false };
+
+pub fn globMatch(pat: []const u8, text: []const u8, o: GlobOpts) bool {
+    return globAt(pat, 0, text, 0, o);
+}
+
+fn globFold(c: u8, o: GlobOpts) u8 {
+    return if (o.casefold) std.ascii.toLower(c) else c;
+}
+
+fn globClass(name: []const u8, c: u8) ?bool {
+    if (std.mem.eql(u8, name, "alpha")) return std.ascii.isAlphabetic(c);
+    if (std.mem.eql(u8, name, "digit")) return std.ascii.isDigit(c);
+    if (std.mem.eql(u8, name, "alnum")) return std.ascii.isAlphanumeric(c);
+    if (std.mem.eql(u8, name, "upper")) return std.ascii.isUpper(c);
+    if (std.mem.eql(u8, name, "lower")) return std.ascii.isLower(c);
+    if (std.mem.eql(u8, name, "space")) return std.ascii.isWhitespace(c);
+    if (std.mem.eql(u8, name, "punct")) return c > 32 and c < 127 and !std.ascii.isAlphanumeric(c);
+    if (std.mem.eql(u8, name, "xdigit")) return std.ascii.isHex(c);
+    if (std.mem.eql(u8, name, "blank")) return c == ' ' or c == '\t';
+    if (std.mem.eql(u8, name, "print")) return c >= 32 and c < 127;
+    if (std.mem.eql(u8, name, "graph")) return c > 32 and c < 127;
+    if (std.mem.eql(u8, name, "cntrl")) return c < 32 or c == 127;
+    return null;
+}
+
+fn globBracket(pat: []const u8, pi: usize, c: u8, o: GlobOpts) ?struct { matched: bool, next: usize } {
+    var i = pi + 1;
+    var neg = false;
+    if (i < pat.len and (pat[i] == '!' or pat[i] == '^')) {
+        neg = true;
+        i += 1;
+    }
+    var matched = false;
+    var first = true;
+    const fc = globFold(c, o);
+    while (i < pat.len) {
+        if (pat[i] == ']' and !first) return .{ .matched = matched != neg, .next = i + 1 };
+        first = false;
+        if (pat[i] == '[' and i + 1 < pat.len and pat[i + 1] == ':') {
+            if (std.mem.findPos(u8, pat, i + 2, ":]")) |e| {
+                const r = globClass(pat[i + 2 .. e], c) orelse return null;
+                if (r) matched = true;
+                i = e + 2;
+                continue;
+            }
+        }
+        var lo = pat[i];
+        if (lo == '\\' and i + 1 < pat.len) {
+            i += 1;
+            lo = pat[i];
+        }
+        i += 1;
+        if (i + 1 < pat.len and pat[i] == '-' and pat[i + 1] != ']') {
+            var hi = pat[i + 1];
+            i += 2;
+            if (hi == '\\' and i < pat.len) {
+                hi = pat[i];
+                i += 1;
+            }
+            if (fc >= globFold(lo, o) and fc <= globFold(hi, o)) matched = true;
+        } else if (globFold(lo, o) == fc) matched = true;
+    }
+    return null;
+}
+
+fn globAt(pat: []const u8, pi_in: usize, text: []const u8, ti_in: usize, o: GlobOpts) bool {
+    var pi = pi_in;
+    var ti = ti_in;
+    while (pi < pat.len) {
+        const p = pat[pi];
+        switch (p) {
+            '*' => {
+                while (pi < pat.len and pat[pi] == '*') pi += 1;
+                if (o.period and ti < text.len and text[ti] == '.' and (ti == 0 or (o.pathname and text[ti - 1] == '/'))) return false;
+                if (pi == pat.len) {
+                    if (o.pathname) return std.mem.findScalar(u8, text[ti..], '/') == null;
+                    return true;
+                }
+                var k = ti;
+                while (k <= text.len) : (k += 1) {
+                    if (globAt(pat, pi, text, k, o)) return true;
+                    if (k < text.len and o.pathname and text[k] == '/') break;
+                }
+                return false;
+            },
+            '?' => {
+                if (ti >= text.len) return false;
+                if (o.pathname and text[ti] == '/') return false;
+                if (o.period and text[ti] == '.' and (ti == 0 or (o.pathname and text[ti - 1] == '/'))) return false;
+                pi += 1;
+                ti += 1;
+            },
+            '[' => {
+                if (ti >= text.len) return false;
+                if (o.pathname and text[ti] == '/') return false;
+                if (o.period and text[ti] == '.' and (ti == 0 or (o.pathname and text[ti - 1] == '/'))) return false;
+                if (globBracket(pat, pi, text[ti], o)) |r| {
+                    if (!r.matched) return false;
+                    pi = r.next;
+                    ti += 1;
+                } else {
+                    if (text[ti] != '[') return false;
+                    pi += 1;
+                    ti += 1;
+                }
+            },
+            else => {
+                var lit = p;
+                if (p == '\\' and pi + 1 < pat.len) {
+                    pi += 1;
+                    lit = pat[pi];
+                }
+                if (ti >= text.len) return false;
+                if (o.period and lit == '.' and false) return false;
+                if (globFold(text[ti], o) != globFold(lit, o)) return false;
+                pi += 1;
+                ti += 1;
+            },
+        }
+    }
+    return ti == text.len;
+}
+
+pub fn globMatchSuffix(pat: []const u8, name: []const u8) bool {
+    if (globMatch(pat, name, .{})) return true;
+    var i: usize = 0;
+    while (i < name.len) : (i += 1) {
+        if (name[i] == '/' and i + 1 < name.len and name[i + 1] != '/') {
+            if (globMatch(pat, name[i + 1 ..], .{})) return true;
+        }
+    }
+    return false;
+}
+
+pub const DirEntry = struct { name: []u8, kind: Io.File.Kind };
+
+pub const DirList = struct {
+    items: std.ArrayList(DirEntry) = .empty,
+
+    pub fn deinit(self: *DirList, alloc: Allocator) void {
+        for (self.items.items) |e| alloc.free(e.name);
+        self.items.deinit(alloc);
+    }
+};
+
+pub fn readDirList(ctx: *Ctx, path: []const u8) !DirList {
+    var pb: [path_max]u8 = undefined;
+    const full = try joinCwd(&pb, ctx.cwd, if (path.len == 0) "." else path);
+    var dir = try Io.Dir.cwd().openDir(ctx.io, full, .{ .iterate = true });
+    defer dir.close(ctx.io);
+    var list: DirList = .{};
+    errdefer list.deinit(ctx.alloc);
+    var it = dir.iterate();
+    while (try it.next(ctx.io)) |e| {
+        if (std.mem.eql(u8, e.name, ".") or std.mem.eql(u8, e.name, "..")) continue;
+        const name = try ctx.alloc.dupe(u8, e.name);
+        errdefer ctx.alloc.free(name);
+        try list.items.append(ctx.alloc, .{ .name = name, .kind = e.kind });
+    }
+    return list;
+}
+
+pub fn statKind(ctx: *Ctx, path: []const u8, follow: bool) ?Io.File.Kind {
+    var pb: [path_max]u8 = undefined;
+    const full = joinCwd(&pb, ctx.cwd, path) catch return null;
+    const st = Io.Dir.cwd().statFile(ctx.io, full, .{ .follow_symlinks = follow }) catch return null;
+    return st.kind;
+}
+
+const byte_rank = blk: {
+    var t = [_]u8{128} ** 256;
+    const common_bytes = " etaoinshrdlucmfwypvbgkjqxz\n.,-_/:;()=0123456789";
+    for (common_bytes, 0..) |c, i| t[c] = @intCast(250 - i);
+    for ('A'..'Z' + 1) |c| t[c] = 200;
+    t[0] = 255;
+    t[0xff] = 5;
+    break :blk t;
+};
+
+pub fn findBytes(hay: []const u8, needle: []const u8, from: usize) ?usize {
+    if (needle.len == 0) return if (from <= hay.len) from else null;
+    if (hay.len < needle.len or from > hay.len - needle.len) return null;
+    if (needle.len == 1) return std.mem.findScalarPos(u8, hay, from, needle[0]);
+    var r1: usize = 0;
+    for (needle, 0..) |c, i| {
+        if (byte_rank[c] < byte_rank[needle[r1]]) r1 = i;
+    }
+    var r2: usize = if (r1 == 0) needle.len - 1 else 0;
+    for (needle, 0..) |c, i| {
+        if (i != r1 and byte_rank[c] < byte_rank[needle[r2]]) r2 = i;
+    }
+    const L = 32;
+    const V = @Vector(L, u8);
+    const b1: V = @splat(needle[r1]);
+    const b2: V = @splat(needle[r2]);
+    const last_start = hay.len - needle.len;
+    const maxr = @max(r1, r2);
+    var i = from;
+    while (i + L + maxr <= hay.len) {
+        const v1: V = hay[i + r1 ..][0..L].*;
+        const v2: V = hay[i + r2 ..][0..L].*;
+        var mask: u32 = @bitCast((v1 == b1) & (v2 == b2));
+        while (mask != 0) {
+            const k = @ctz(mask);
+            mask &= mask - 1;
+            const pos = i + k;
+            if (pos <= last_start and std.mem.eql(u8, hay[pos..][0..needle.len], needle)) return pos;
+        }
+        i += L;
+    }
+    while (i <= last_start) : (i += 1) {
+        if (hay[i] == needle[0] and std.mem.eql(u8, hay[i..][0..needle.len], needle)) return i;
+    }
+    return null;
+}
+
 pub fn isDashOperand(s: []const u8) bool {
     return s.len == 1 and s[0] == '-';
 }
@@ -962,6 +1179,18 @@ test "line reader spans buffer boundaries" {
         try std.testing.expectEqual(i != 3, l.terminated);
     }
     try std.testing.expect((try lr.next()) == null);
+}
+
+test "findBytes" {
+    const hay = "the quick brown fox jumps over the lazy dog, again and again until the end of the haystack xyz";
+    const needles = [_][]const u8{ "the", "xyz", "again", "z", "haystack xyz", "dog,", "nope", "ck", "x" };
+    for (needles) |n| {
+        for (0..hay.len) |from| {
+            const want = std.mem.find(u8, hay[from..], n);
+            const got = findBytes(hay, n, from);
+            try std.testing.expectEqual(if (want) |w| @as(?usize, w + from) else null, got);
+        }
+    }
 }
 
 test "joinCwd" {
