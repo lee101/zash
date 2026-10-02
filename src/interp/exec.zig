@@ -89,6 +89,7 @@ pub fn run_top(sh: *Shell, list: ast.List, src: []const u8) Err!u8 {
         const m = sh.scratch.mark();
         if (sh.opt(.verbose)) verbose_echo(sh, src, list, idx, &next_line, 0);
         sh.scratch.release(m);
+        sh.alias_horizon = item.line;
         status = run_item(sh, item) catch |e| switch (e) {
             error.Abort => {
                 skip_line = item.line;
@@ -152,8 +153,12 @@ fn run_pipeline_ign(sh: *Shell, p: ast.Pipeline, ignore: bool) Err!u8 {
 }
 
 pub fn errexit_check(sh: *Shell, status: u8) Err!void {
+    return errexit_check_t(sh, status, true);
+}
+
+pub fn errexit_check_t(sh: *Shell, status: u8, had_trap: bool) Err!void {
     if (status == 0 or sh.noerrexit > 0) return;
-    if (sh.trap_err.kind == .cmd and !sh.trap_err.inherited and !sh.in_err_trap) {
+    if (had_trap and sh.trap_err.kind == .cmd and !sh.trap_err.inherited and !sh.in_err_trap) {
         sh.in_err_trap = true;
         defer sh.in_err_trap = false;
         const saved = sh.status;
@@ -183,6 +188,7 @@ fn run_pipeline(sh: *Shell, p: ast.Pipeline) Err!u8 {
         sh.noerrexit -= 1;
     };
     var status: u8 = undefined;
+    const had_trap = sh.trap_err.kind == .cmd;
     if (p.commands.len == 1) {
         const c = &p.commands[0];
         status = try run_command(sh, c, false);
@@ -197,7 +203,7 @@ fn run_pipeline(sh: *Shell, p: ast.Pipeline) Err!u8 {
         if (!p.negate) {
             sh.status = status;
             switch (c.body) {
-                .simple, .subshell, .arith_cmd, .cond => try errexit_check(sh, status),
+                .simple, .subshell, .arith_cmd, .cond => try errexit_check_t(sh, status, had_trap),
                 else => {},
             }
         }
@@ -205,7 +211,7 @@ fn run_pipeline(sh: *Shell, p: ast.Pipeline) Err!u8 {
         status = try run_multi(sh, p);
         if (!p.negate) {
             sh.status = status;
-            try errexit_check(sh, status);
+            try errexit_check_t(sh, status, had_trap);
         }
     }
     if (p.negate) {
@@ -395,17 +401,42 @@ fn run_multi(sh: *Shell, p: ast.Pipeline) Err!u8 {
     return result;
 }
 
-pub fn wait_raw(_: *Shell, pid: c_int) ?c_int {
+var wait_got_int: bool = false;
+
+fn wait_int_handler(_: c_int) callconv(.c) void {
+    wait_got_int = true;
+}
+
+pub fn wait_raw(sh: *Shell, pid: c_int) ?c_int {
     var st: c_int = 0;
+    const manage = sh.traps[sys.SIGINT].kind == .none and !sh.in_subshell;
+    var old: sys.SigAction = .{ .handler = 0 };
+    if (manage) {
+        wait_got_int = false;
+        var act: sys.SigAction = .{ .handler = @intFromPtr(&wait_int_handler) };
+        _ = sys.sigemptyset(&act.mask);
+        _ = sys.sigaction(sys.SIGINT, &act, &old);
+    }
+    var result: ?c_int = null;
     while (true) {
         const r = sys.waitpid(pid, &st, 0);
         if (r < 0) {
             if (sys.errno() == sys.EINTR) continue;
-            return null;
+            break;
         }
+        result = st;
         break;
     }
-    return st;
+    if (manage) {
+        _ = sys.sigaction(sys.SIGINT, &old, null);
+        if (result) |rs| {
+            if (sys.wifsignaled(rs) and sys.wtermsig(rs) == sys.SIGINT) {
+                sys.set_signal(sys.SIGINT, sys.SIG_DFL);
+                _ = sys.kill(sys.getpid(), sys.SIGINT);
+            }
+        }
+    }
+    return result;
 }
 
 pub fn wait_pid(sh: *Shell, pid: c_int) u8 {
@@ -1046,7 +1077,7 @@ fn alias_text(sh: *Shell, c: *const ast.Command, s: ast.Simple) Err!?[]const u8 
     const first = plain_lit(s.words[0]) orelse return null;
     var value = sh.aliases.get(first) orelse return null;
     if (sh.alias_lines.get(first)) |dl| {
-        if (c.line <= dl) return null;
+        if (dl >= sh.alias_horizon) return null;
     }
     var w: unparse.W = .{ .sh = sh, .a = sh.sa };
     if (s.assigns.len > 0) {
@@ -1059,7 +1090,7 @@ fn alias_text(sh: *Shell, c: *const ast.Command, s: ast.Simple) Err!?[]const u8 
         const nxt = plain_lit(s.words[wi]) orelse break;
         const v2 = sh.aliases.get(nxt) orelse break;
         if (sh.alias_lines.get(nxt)) |dl| {
-            if (c.line <= dl) break;
+            if (dl >= sh.alias_horizon) break;
         }
         try w.put(v2);
         value = v2;
@@ -1463,6 +1494,9 @@ pub fn call_function(sh: *Shell, f: *const shell.Func, args: []const []const u8)
     const saved_line = sh.lineno;
     sh.cur_file = f.file;
     const saved_loop = sh.loop_depth;
+    const saved_horizon = sh.alias_horizon;
+    sh.alias_horizon = f.line;
+    defer sh.alias_horizon = saved_horizon;
     sh.loop_depth = 0;
     const saved_trap_debug = sh.trap_debug;
     const saved_trap_err = sh.trap_err;
@@ -1998,6 +2032,9 @@ pub fn run_string(sh: *Shell, src: []const u8, o: StringOpts) Err!u8 {
         }
     }
     const src_copy = try arena.allocator().dupe(u8, src);
+    const saved_horizon = sh.alias_horizon;
+    sh.alias_horizon = std.math.maxInt(u32);
+    defer sh.alias_horizon = saved_horizon;
     var p = parser.Parser.init(arena.allocator(), src_copy, .{});
     p.lex.line_base = o.line_base + 1;
     p.lex.cache_line = p.lex.line_base;
