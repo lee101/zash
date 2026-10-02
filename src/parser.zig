@@ -60,21 +60,65 @@ pub const Parser = struct {
         return list;
     }
 
+    const Lens = struct { items: usize, words: usize, redirs: usize, assigns: usize, cmds: usize, links: usize, clauses: usize, case_clauses: usize, pipes: usize };
+
+    fn save_lens(self: *Parser) Lens {
+        return .{
+            .items = self.items.items.len,
+            .words = self.words.items.len,
+            .redirs = self.redirs.items.len,
+            .assigns = self.assigns.items.len,
+            .cmds = self.cmds.items.len,
+            .links = self.links.items.len,
+            .clauses = self.clauses.items.len,
+            .case_clauses = self.case_clauses.items.len,
+            .pipes = self.pipes.items.len,
+        };
+    }
+
+    fn restore_lens(self: *Parser, l: Lens) void {
+        self.items.items.len = l.items;
+        self.words.items.len = l.words;
+        self.redirs.items.len = l.redirs;
+        self.assigns.items.len = l.assigns;
+        self.cmds.items.len = l.cmds;
+        self.links.items.len = l.links;
+        self.clauses.items.len = l.clauses;
+        self.case_clauses.items.len = l.case_clauses;
+        self.pipes.items.len = l.pipes;
+    }
+
     pub fn parse_subst_body(self: *Parser, open: usize) Error!ast.List {
+        const lens = self.save_lens();
+        errdefer self.restore_lens(lens);
         const saved_pending = self.lex.pending;
         const saved_tok = self.tok;
         self.lex.pending = .empty;
+        self.lex.subst_depth += 1;
         defer {
             self.lex.pending = saved_pending;
             self.tok = saved_tok;
+            self.lex.subst_depth -= 1;
         }
         try self.advance(true);
-        const list = try self.parse_list(false);
+        const list = self.parse_list(false) catch |e| return self.matching_on_eof(e, open);
         if (self.tok.tag != .rparen) {
             if (self.tok.tag == .eof) return self.lex.fail_matching(")", open);
             return self.unexpected();
         }
         return list;
+    }
+
+    fn matching_on_eof(self: *Parser, e: Error, open: usize) Error {
+        if (e == error.Syntax) {
+            if (self.lex.err) |le| {
+                if (le.kind == .unexpected_eof) {
+                    self.lex.err = null;
+                    return self.lex.fail_matching(")", open);
+                }
+            }
+        }
+        return e;
     }
 
     fn advance(self: *Parser, assign_ok: bool) Error!void {
@@ -452,8 +496,9 @@ pub const Parser = struct {
                 return .{ .body = .{ .arith_cmd = e } };
             }
         }
+        const double = s + 1 < src.len and src[s + 1] == '(';
         try self.advance(true);
-        const list = try self.parse_list(true);
+        const list = self.parse_list(true) catch |e| return if (double) self.matching_on_eof(e, s) else e;
         if (self.tok.tag != .rparen) return self.unexpected();
         try self.advance(true);
         return .{ .body = .{ .subshell = list } };
@@ -684,13 +729,22 @@ pub const Parser = struct {
         return n;
     }
 
+    fn tok_text(self: *Parser, t: Token) []const u8 {
+        return if (t.tag == .newline or t.tag == .eof) "newline" else self.lex.orig[t.start..t.end];
+    }
+
+    fn cond_fail(self: *Parser, comptime fmt: []const u8, args: anytype, near: Token) Error {
+        const detail = std.fmt.allocPrint(self.alloc(), fmt, args) catch return error.OutOfMemory;
+        return self.lex.fail_cond(detail, near);
+    }
+
     fn parse_cond_command(self: *Parser) Error!ast.Command {
         const open = self.tok.start;
         try self.cond_advance(false);
         const c = try self.parse_cond_or(open);
         if (!self.is_kw(.kw_drbracket)) {
-            if (self.tok.tag == .eof) return self.lex.fail_matching("]]", open);
-            return self.lex.fail_cond("syntax error in conditional expression", self.tok);
+            if (self.tok.tag == .eof) return self.lex.fail_looking("]]", open);
+            return self.cond_fail("syntax error in conditional expression: unexpected token `{s}'", .{self.tok_text(self.tok)}, self.tok);
         }
         try self.advance(true);
         return .{ .body = .{ .cond = c } };
@@ -737,15 +791,15 @@ pub const Parser = struct {
             try self.cond_advance(false);
             const e = try self.parse_cond_or(open);
             if (self.tok.tag != .rparen) {
-                if (self.tok.tag == .eof) return self.lex.fail_matching("]]", open);
-                return self.lex.fail_cond("unexpected token, expected `)'", self.tok);
+                if (self.tok.tag == .eof) return self.lex.fail_looking("]]", open);
+                return self.cond_fail("unexpected token `{s}', expected `)'", .{self.tok_text(self.tok)}, self.tok);
             }
             try self.cond_advance(false);
             return self.mk_cond(.{ .group = e });
         }
-        if (self.tok.tag == .eof) return self.lex.fail_matching("]]", open);
-        if (self.tok.tag != .word) return self.lex.fail_cond("unexpected token in conditional expression", self.tok);
-        if (self.tok.kw == .kw_drbracket) return self.lex.fail_cond("unexpected argument `]]' to conditional expression", self.tok);
+        if (self.tok.tag == .eof) return self.lex.fail_looking("]]", open);
+        if (self.tok.tag != .word) return self.cond_fail("syntax error in conditional expression: unexpected token `{s}'", .{self.tok_text(self.tok)}, self.tok);
+        if (self.tok.kw == .kw_drbracket) return self.lex.fail_cond("", self.tok);
         const first = self.cur_word();
         const first_tok = self.tok;
         try self.cond_advance(false);
@@ -757,21 +811,24 @@ pub const Parser = struct {
                     return self.mk_cond(.{ .unary = .{ .op = u, .arg = arg } });
                 }
                 if (self.binary_op() == null) {
-                    if (self.tok.tag == .eof) return self.lex.fail_matching("]]", open);
-                    return self.lex.fail_cond("unexpected argument to conditional unary operator", self.tok);
+                    const near = if (self.tok.tag == .eof) first_tok else self.tok;
+                    return self.cond_fail("unexpected argument `{s}' to conditional unary operator", .{self.tok_text(self.tok)}, near);
                 }
             }
         }
         if (self.binary_op()) |op| {
+            const op_tok = self.tok;
             try self.cond_advance(op == .match);
-            if (self.tok.tag == .eof) return self.lex.fail_matching("]]", open);
-            if (!self.cond_operand_ok()) return self.lex.fail_cond("unexpected argument to conditional binary operator", self.tok);
+            if (!self.cond_operand_ok()) {
+                const near = if (self.tok.tag == .eof) op_tok else self.tok;
+                return self.cond_fail("unexpected argument `{s}' to conditional binary operator", .{self.tok_text(self.tok)}, near);
+            }
             const rhs = self.cur_word();
             try self.cond_advance(false);
             return self.mk_cond(.{ .binary = .{ .op = op, .lhs = first, .rhs = rhs } });
         }
-        _ = first_tok;
-        if (self.cond_operand_ok()) return self.lex.fail_cond("conditional binary operator expected", self.tok);
+        if (self.cond_operand_ok()) return self.cond_fail("conditional binary operator expected", .{}, self.tok);
+        if (self.tok.tag == .eof) return self.cond_fail("unexpected token `newline', conditional binary operator expected", .{}, first_tok);
         return self.mk_cond(.{ .word = first });
     }
 };
@@ -801,4 +858,59 @@ fn expect_dump(src: []const u8, want: []const u8) !void {
 
 test "smoke" {
     try expect_dump("echo hi", "(list (cmd \"echo\" \"hi\"))");
+}
+
+const fuzz_seeds = [_][]const u8{
+    "echo a b | cat && ls || true; x=1 y=(1 2) cmd > f 2>&1 &",
+    "if a; then b; elif c; then d; else e; fi",
+    "for ((i=0;i<3;i++)); do echo $i; done; for i in a b; do :; done",
+    "case x in a|b) echo ${x:-y}${x//a/b};; *) $((1+2*3));; esac",
+    "cat <<EOF\nhello $x `date` $(cmd)\nEOF\necho after",
+    "f() { [[ a == b && ( -f c || d =~ ^e+$ ) ]]; (( x++ )); }",
+    "echo {a,b{1..3}} ~root/x <(a) >(b) $'a\\n' \"$(a \"b\")\" ${!x[@]:1:2}",
+    "a=$(b `c`) d[1]+=e; while read l; do echo \"$l\"; done < <(x) | y",
+};
+
+test "fuzz mutations do not crash" {
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rnd = prng.random();
+    const alphabet = "abc $()`'\"\\{}[]<>|&;#!*?~=,.:-+/%^\n\t012";
+    var buf: [256]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 20000) : (iter += 1) {
+        const seed = fuzz_seeds[rnd.uintLessThan(usize, fuzz_seeds.len)];
+        const n = @min(seed.len, buf.len);
+        @memcpy(buf[0..n], seed[0..n]);
+        var len = n;
+        const muts = rnd.uintLessThan(usize, 6);
+        var m: usize = 0;
+        while (m < muts) : (m += 1) {
+            switch (rnd.uintLessThan(usize, 3)) {
+                0 => if (len > 0) {
+                    buf[rnd.uintLessThan(usize, len)] = alphabet[rnd.uintLessThan(usize, alphabet.len)];
+                },
+                1 => if (len > 0) {
+                    const at = rnd.uintLessThan(usize, len);
+                    std.mem.copyForwards(u8, buf[at .. len - 1], buf[at + 1 .. len]);
+                    len -= 1;
+                },
+                else => if (len < buf.len) {
+                    const at = rnd.uintLessThan(usize, len + 1);
+                    std.mem.copyBackwards(u8, buf[at + 1 .. len + 1], buf[at..len]);
+                    buf[at] = alphabet[rnd.uintLessThan(usize, alphabet.len)];
+                    len += 1;
+                },
+            }
+        }
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        switch (parse(arena.allocator(), buf[0..len], .{})) {
+            .ok => |l| _ = try dump.dump_alloc(arena.allocator(), l),
+            .err => |e| {
+                var ebuf: [1024]u8 = undefined;
+                var w = std.Io.Writer.fixed(&ebuf);
+                e.write(&w, "zash") catch {};
+            },
+        }
+    }
 }

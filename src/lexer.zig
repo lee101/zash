@@ -92,7 +92,7 @@ pub const ParseError = struct {
     detail: []const u8 = "",
     src_line: []const u8 = "",
 
-    pub const Kind = enum { unexpected_token, unexpected_eof, eof_matching, cond_syntax, nesting };
+    pub const Kind = enum { unexpected_token, unexpected_eof, eof_matching, eof_looking, cond_syntax, nesting };
 
     pub fn write(self: ParseError, w: *std.Io.Writer, prefix: []const u8) std.Io.Writer.Error!void {
         switch (self.kind) {
@@ -107,8 +107,12 @@ pub const ParseError = struct {
                 try w.print("{s}: line {d}: unexpected EOF while looking for matching `{s}'\n", .{ prefix, self.line, self.text });
                 try w.print("{s}: line {d}: syntax error: unexpected end of file\n", .{ prefix, self.eof_line });
             },
+            .eof_looking => {
+                try w.print("{s}: line {d}: unexpected EOF while looking for `{s}'\n", .{ prefix, self.line, self.text });
+                try w.print("{s}: line {d}: syntax error: unexpected end of file\n", .{ prefix, self.eof_line });
+            },
             .cond_syntax => {
-                try w.print("{s}: line {d}: {s}\n", .{ prefix, self.line, self.detail });
+                if (self.detail.len > 0) try w.print("{s}: line {d}: {s}\n", .{ prefix, self.line, self.detail });
                 try w.print("{s}: line {d}: syntax error near `{s}'\n", .{ prefix, self.line, self.text });
                 try w.print("{s}: line {d}: `{s}'\n", .{ prefix, self.line, self.src_line });
             },
@@ -170,6 +174,7 @@ pub const Lexer = struct {
     extglob: bool = true,
     depth: u32 = 0,
     no_heredoc: bool = false,
+    subst_depth: u32 = 0,
 
     pub fn init(arena: Allocator, src: []const u8, opts: Options) Lexer {
         return .{ .arena = arena, .src = src, .orig = src, .extglob = opts.extglob };
@@ -228,6 +233,18 @@ pub const Lexer = struct {
         if (self.err != null) return error.Syntax;
         self.err = .{
             .kind = .eof_matching,
+            .line = self.line_at(at),
+            .col = self.col_at(at),
+            .eof_line = self.eof_line(),
+            .text = ch,
+        };
+        return error.Syntax;
+    }
+
+    pub fn fail_looking(self: *Lexer, ch: []const u8, at: usize) Error {
+        if (self.err != null) return error.Syntax;
+        self.err = .{
+            .kind = .eof_looking,
             .line = self.line_at(at),
             .col = self.col_at(at),
             .eof_line = self.eof_line(),
@@ -388,8 +405,8 @@ pub const Lexer = struct {
             2 => if (std.mem.eql(u8, text, "if")) .kw_if else if (std.mem.eql(u8, text, "fi")) .kw_fi else if (std.mem.eql(u8, text, "do")) .kw_do else if (std.mem.eql(u8, text, "in")) .kw_in else if (std.mem.eql(u8, text, "[[")) .kw_dlbracket else if (std.mem.eql(u8, text, "]]")) .kw_drbracket else .none,
             3 => if (std.mem.eql(u8, text, "for")) .kw_for else .none,
             4 => if (std.mem.eql(u8, text, "then")) .kw_then else if (std.mem.eql(u8, text, "else")) .kw_else else if (std.mem.eql(u8, text, "elif")) .kw_elif else if (std.mem.eql(u8, text, "done")) .kw_done else if (std.mem.eql(u8, text, "case")) .kw_case else if (std.mem.eql(u8, text, "esac")) .kw_esac else if (std.mem.eql(u8, text, "time")) .kw_time else .none,
-            5 => if (std.mem.eql(u8, text, "while")) .kw_while else if (std.mem.eql(u8, text, "until")) .kw_until else if (std.mem.eql(u8, text, "coproc")) .kw_coproc else .none,
-            6 => if (std.mem.eql(u8, text, "select")) .kw_select else .none,
+            5 => if (std.mem.eql(u8, text, "while")) .kw_while else if (std.mem.eql(u8, text, "until")) .kw_until else .none,
+            6 => if (std.mem.eql(u8, text, "select")) .kw_select else if (std.mem.eql(u8, text, "coproc")) .kw_coproc else .none,
             8 => if (std.mem.eql(u8, text, "function")) .kw_function else .none,
             else => .none,
         };
@@ -776,7 +793,7 @@ pub const Lexer = struct {
 
     fn skip_extglob(self: *Lexer, at: usize) Error!usize {
         const src = self.src;
-        var depth: u32 = 0;
+        var depth: u32 = 1;
         var i = at + 1;
         while (i < src.len) : (i += 1) {
             switch (src[i]) {
@@ -905,8 +922,10 @@ pub const Lexer = struct {
                         try run.emit(self, self.pos);
                         const open = self.pos;
                         self.pos += 2;
-                        const p: *Parser = @fieldParentPtr("lex", self);
-                        const body = try p.parse_subst_body(open);
+                        const body = (try self.parse_subst_lenient(open)) orelse {
+                            run.start = self.pos;
+                            continue;
+                        };
                         const ps = try self.arena.create(ast.ProcSubst);
                         ps.* = .{ .input = c == '<', .body = body };
                         try self.parts.append(self.arena, .{ .proc_subst = ps });
@@ -1025,6 +1044,24 @@ pub const Lexer = struct {
         return null;
     }
 
+    fn parse_subst_lenient(self: *Lexer, open: usize) Error!?ast.List {
+        const p: *Parser = @fieldParentPtr("lex", self);
+        const parts_len = self.parts.items.len;
+        return p.parse_subst_body(open) catch |e| {
+            if (e != error.Syntax) return e;
+            switch (self.err.?.kind) {
+                .eof_matching, .unexpected_eof, .eof_looking, .nesting => return e,
+                else => {},
+            }
+            const end = self.extent(open + 2, ')', ')') orelse return e;
+            self.err = null;
+            self.parts.items.len = parts_len;
+            self.pos = end + 1;
+            try self.parts.append(self.arena, .{ .bad_subst = self.src[open .. end + 1] });
+            return null;
+        };
+    }
+
     pub fn scan_dollar(self: *Lexer, ctx: Ctx, dq: bool) Error!void {
         const src = self.src;
         const open = self.pos;
@@ -1040,8 +1077,7 @@ pub const Lexer = struct {
                     }
                 }
                 self.pos = open + 2;
-                const p: *Parser = @fieldParentPtr("lex", self);
-                const body = try p.parse_subst_body(open);
+                const body = (try self.parse_subst_lenient(open)) orelse return;
                 const cs = try self.arena.create(ast.CmdSubst);
                 cs.* = .{ .body = body };
                 try self.parts.append(self.arena, .{ .cmd_subst = cs });
@@ -1211,8 +1247,9 @@ pub const Lexer = struct {
         sub.lex.cache_line = sub.lex.line_base;
         sub.lex.depth = self.depth;
         const body = sub.parse_script() catch |e| {
-            if (e == error.Syntax and self.err == null) self.err = sub.lex.err;
-            return e;
+            if (e != error.Syntax) return e;
+            try self.parts.append(self.arena, .{ .bad_subst = src[open..self.pos] });
+            return;
         };
         const cs = try self.arena.create(ast.CmdSubst);
         cs.* = .{ .body = body, .backtick = true };
@@ -1406,10 +1443,15 @@ pub const Lexer = struct {
             while (self.pos < src.len) {
                 const ls = self.pos;
                 const le = std.mem.findScalarPos(u8, src, ls, '\n') orelse src.len;
-                var line = src[ls..le];
+                const raw = src[ls..le];
+                var line = raw;
                 if (h.strip_tabs) line = std.mem.trimStart(u8, line, "\t");
                 self.pos = @min(le + 1, src.len);
                 if (std.mem.eql(u8, line, h.delimiter)) break;
+                if (self.subst_depth > 0 and line.len > h.delimiter.len and line[h.delimiter.len] == ')' and std.mem.startsWith(u8, line, h.delimiter)) {
+                    self.pos = ls + (raw.len - line.len) + h.delimiter.len;
+                    break;
+                }
                 body_end = self.pos;
             }
             var text: []const u8 = src[body_start..body_end];

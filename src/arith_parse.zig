@@ -7,21 +7,33 @@ const Allocator = std.mem.Allocator;
 
 const AErr = error{ ArithSyntax, Syntax, OutOfMemory };
 
+const max_nodes: u32 = 10000;
+
 const BinInfo = struct { op: ast.BinOp, len: u8, prec: u8 };
 const AssignInfo = struct { op: ?ast.BinOp, len: u8 };
 
 const A = struct {
     lx: *Lexer,
     msg: []const u8 = "",
+    nodes: u32 = 0,
 
     fn arena(self: *A) Allocator {
         return self.lx.arena;
     }
 
-    fn mk(self: *A, v: ast.Arith) Allocator.Error!*const ast.Arith {
+    fn alloc_node(self: *A, v: ast.Arith) Allocator.Error!*const ast.Arith {
         const n = try self.arena().create(ast.Arith);
         n.* = v;
         return n;
+    }
+
+    fn mk(self: *A, v: ast.Arith) AErr!*const ast.Arith {
+        self.nodes += 1;
+        if (self.nodes > max_nodes) {
+            self.msg = "expression too complex";
+            return error.ArithSyntax;
+        }
+        return self.alloc_node(v);
     }
 
     fn ws(self: *A) void {
@@ -43,6 +55,15 @@ const A = struct {
         const rest = std.mem.trim(u8, self.lx.src[@min(self.lx.pos, self.lx.src.len)..], " \t\n");
         self.msg = std.fmt.allocPrint(self.arena(), what ++ " (error token is \"{s}\")", .{rest}) catch "syntax error";
         return error.ArithSyntax;
+    }
+
+    fn enter(self: *A) AErr!void {
+        self.lx.depth += 1;
+        if (self.lx.depth > lexer.max_depth) return self.lx.fail_nesting();
+    }
+
+    fn leave(self: *A) void {
+        self.lx.depth -= 1;
     }
 
     fn parse_comma(self: *A) AErr!*const ast.Arith {
@@ -78,6 +99,8 @@ const A = struct {
     }
 
     fn parse_assign(self: *A) AErr!*const ast.Arith {
+        try self.enter();
+        defer self.leave();
         const lhs = try self.parse_ternary();
         self.ws();
         if (self.assign_op()) |ao| {
@@ -90,6 +113,8 @@ const A = struct {
     }
 
     fn parse_ternary(self: *A) AErr!*const ast.Arith {
+        try self.enter();
+        defer self.leave();
         const c = try self.parse_binary(1);
         self.ws();
         if (self.at(0) != '?') return c;
@@ -124,6 +149,8 @@ const A = struct {
     }
 
     fn parse_binary(self: *A, min_prec: u8) AErr!*const ast.Arith {
+        try self.enter();
+        defer self.leave();
         var lhs = try self.parse_unary();
         while (true) {
             self.ws();
@@ -138,6 +165,8 @@ const A = struct {
     }
 
     fn parse_unary(self: *A) AErr!*const ast.Arith {
+        try self.enter();
+        defer self.leave();
         self.ws();
         const c = self.at(0);
         const c1 = self.at(1);
@@ -309,11 +338,11 @@ pub fn parse_region(lx: *Lexer, start: usize, end: usize) lexer.Error!*const ast
     }
     const text = saved_src[start..end];
     var a = A{ .lx = lx };
-    if (std.mem.trim(u8, text, " \t\n").len == 0) return a.mk(.{ .num = 0 });
+    if (std.mem.trim(u8, text, " \t\n").len == 0) return a.alloc_node(.{ .num = 0 });
     lx.src = saved_src[0..end];
     lx.pos = start;
     const result = parse_top(&a) catch |e| switch (e) {
-        error.ArithSyntax => return a.mk(.{ .invalid = .{ .expr = text, .msg = a.msg } }),
+        error.ArithSyntax => return a.alloc_node(.{ .invalid = .{ .expr = text, .msg = a.msg } }),
         error.Syntax => return error.Syntax,
         error.OutOfMemory => return error.OutOfMemory,
     };

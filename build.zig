@@ -12,6 +12,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const bench_lib = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = if (optimize == .Debug) .ReleaseFast else optimize,
+        .link_libc = true,
+    });
+
     const exe = b.addExecutable(.{
         .name = "zash",
         .root_module = b.createModule(.{
@@ -29,6 +36,20 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Build and run zash");
     run_step.dependOn(&run_cmd.step);
+
+    const bench_exe = b.addExecutable(.{
+        .name = "parse_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/parse_bench.zig"),
+            .target = target,
+            .optimize = if (optimize == .Debug) .ReleaseFast else optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zash", .module = bench_lib }},
+        }),
+    });
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("parse-bench", "Run the parser benchmark");
+    bench_step.dependOn(&run_bench.step);
 
     const filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
     const lib_tests = b.addTest(.{ .root_module = lib_mod, .filters = filters });
