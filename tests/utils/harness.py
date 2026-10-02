@@ -218,7 +218,7 @@ def main():
     ap.add_argument("--nobuild", action="store_true")
     ap.add_argument("--big", action="store_true")
     ap.add_argument("-v", action="store_true")
-    ap.add_argument("--maxfail", type=int, default=25)
+    ap.add_argument("--maxfail", type=int, default=12)
     a = ap.parse_args()
     if not a.nobuild:
         build()
@@ -250,8 +250,18 @@ def main():
             with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
                 list(ex.map(work, mod.cases(fx)))
             print("%-8s total=%d pass=%d fail=%d unsupported-skipped=%d (%.1fs)" % (u, stats.total, stats.passed, stats.failed, stats.unsupported, time.time() - t0))
-            for case, why in stats.fails[:a.maxfail]:
-                print("  FAIL %r stdin=%r: %s" % (case.args, (case.stdin or b"")[:40], why))
+            seen = set()
+            uniq = []
+            for case, why in stats.fails:
+                k = (tuple(case.args), case.stdin)
+                if k in seen:
+                    continue
+                seen.add(k)
+                uniq.append((case, why))
+            if len(uniq) != len(stats.fails):
+                print("  (%d distinct failing cases)" % len(uniq))
+            for case, why in uniq[:a.maxfail]:
+                print(("  FAIL %r stdin=%r: %s" % (case.args, (case.stdin or b"")[:12], why))[:330])
             grand += stats.failed
     sys.exit(1 if grand else 0)
 
