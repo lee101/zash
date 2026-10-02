@@ -7,6 +7,7 @@ pub const ast_dump = @import("ast_dump.zig");
 pub const arith_parse = @import("arith_parse.zig");
 pub const lexer = @import("lexer.zig");
 pub const parser = @import("parser.zig");
+pub const interp = @import("interp/root.zig");
 
 fn is_module_name(comptime name: []const u8) bool {
     if (name.len == 0 or std.ascii.isUpper(name[0])) return false;

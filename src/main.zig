@@ -1,83 +1,166 @@
 const std = @import("std");
 const zash = @import("zash");
 
-const usage = "usage: zash [--dump-ast] [-n] (-c command | script)\n";
+const interp = zash.interp;
+const sys = interp.sys;
 
-pub fn main(init: std.process.Init) !void {
-    const io = init.io;
-    const arena = init.arena.allocator();
-    const args = try init.minimal.args.toSlice(arena);
+const usage = "usage: zash [--dump-ast] [-n] [-eux...] [-o option] [-O shopt] (-c command [name [arg...]] | [script [arg...]])\n";
 
-    var out_buf: [4096]u8 = undefined;
-    var out = std.Io.File.stdout().writer(io, &out_buf);
-    var err_buf: [4096]u8 = undefined;
-    var err = std.Io.File.stderr().writer(io, &err_buf);
-    const status = run(io, arena, args[1..], &out.interface, &err.interface);
-    out.interface.flush() catch {};
-    err.interface.flush() catch {};
-    std.process.exit(status);
+fn die(msg: []const u8, code: u8) u8 {
+    _ = sys.write_all(2, msg);
+    return code;
 }
 
-fn run(io: std.Io, arena: std.mem.Allocator, args: []const [:0]const u8, out: *std.Io.Writer, err: *std.Io.Writer) u8 {
+fn read_all_fd(a: std.mem.Allocator, fd: c_int) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    var chunk: [65536]u8 = undefined;
+    while (true) {
+        const n = sys.read_some(fd, &chunk);
+        if (n <= 0) break;
+        try buf.appendSlice(a, chunk[0..@intCast(n)]);
+    }
+    return buf.items;
+}
+
+pub fn main(init: std.process.Init.Minimal) u8 {
+    const gpa = std.heap.c_allocator;
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const arena = arena_state.allocator();
+    const args = init.args.toSlice(arena) catch return 1;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const sh = interp.Shell.init(gpa, io) catch return 1;
+
     var dump_ast = false;
     var parse_only = false;
     var command: ?[]const u8 = null;
     var script: ?[]const u8 = null;
-    var i: usize = 0;
+    var read_stdin = false;
+    var interactive = false;
+    var i: usize = 1;
+    var set_flags: std.ArrayList([]const u8) = .empty;
+    var shopt_args: std.ArrayList([2][]const u8) = .empty;
     while (i < args.len) : (i += 1) {
-        const a = args[i];
+        const a: []const u8 = args[i];
         if (std.mem.eql(u8, a, "--version")) {
-            out.print("zash {s}\n", .{zash.version}) catch {};
+            _ = sys.write_all(1, "zash " ++ zash.version ++ "\n");
             return 0;
         } else if (std.mem.eql(u8, a, "--dump-ast")) {
             dump_ast = true;
-        } else if (std.mem.eql(u8, a, "-n")) {
-            parse_only = true;
-        } else if (std.mem.eql(u8, a, "-c")) {
+        } else if (std.mem.eql(u8, a, "--norc") or std.mem.eql(u8, a, "--noprofile") or std.mem.eql(u8, a, "--login") or std.mem.eql(u8, a, "--posix") or std.mem.eql(u8, a, "--noediting") or std.mem.eql(u8, a, "--restricted")) {} else if (std.mem.eql(u8, a, "--")) {
             i += 1;
-            if (i >= args.len) {
-                err.writeAll("zash: -c: option requires an argument\n") catch {};
-                return 2;
-            }
-            command = args[i];
-        } else if (a.len > 0 and a[0] == '-' and a.len > 1) {
-            err.print("zash: {s}: invalid option\n{s}", .{ a, usage }) catch {};
-            return 2;
-        } else {
-            script = a;
             break;
+        } else if (std.mem.eql(u8, a, "-")) {
+            read_stdin = true;
+            i += 1;
+            break;
+        } else if (a.len > 1 and (a[0] == '-' or a[0] == '+')) {
+            const on = a[0] == '-';
+            var j: usize = 1;
+            while (j < a.len) : (j += 1) {
+                const c = a[j];
+                switch (c) {
+                    'c' => {
+                        if (on) {
+                            i += 1;
+                            if (i >= args.len) return die("zash: -c: option requires an argument\n", 2);
+                            command = args[i];
+                        }
+                    },
+                    's' => read_stdin = true,
+                    'i' => interactive = true,
+                    'l' => {},
+                    'n' => parse_only = true,
+                    'o' => {
+                        i += 1;
+                        if (i >= args.len) return die("zash: -o: option requires an argument\n", 2);
+                        set_flags.append(arena, std.fmt.allocPrint(arena, "{c}o", .{a[0]}) catch return 1) catch return 1;
+                        set_flags.append(arena, args[i]) catch return 1;
+                    },
+                    'O' => {
+                        i += 1;
+                        if (i >= args.len) return die("zash: -O: option requires an argument\n", 2);
+                        shopt_args.append(arena, .{ if (on) "-s" else "-u", args[i] }) catch return 1;
+                    },
+                    else => {
+                        set_flags.append(arena, std.fmt.allocPrint(arena, "{c}{c}", .{ a[0], c }) catch return 1) catch return 1;
+                    },
+                }
+            }
+        } else break;
+    }
+    const rest = args[i..];
+
+    var env_ptrs: []const ?[*:0]const u8 = &.{};
+    env_ptrs = init.environ.block.slice;
+
+    var script_name: []const u8 = "zash";
+    var pos_args: []const [:0]const u8 = rest;
+    var source: []const u8 = "";
+    if (command) |c| {
+        source = c;
+        if (rest.len > 0) {
+            script_name = rest[0];
+            pos_args = rest[1..];
+        } else pos_args = rest;
+    } else if (!read_stdin and rest.len > 0) {
+        script = rest[0];
+        script_name = rest[0];
+        pos_args = rest[1..];
+        source = std.Io.Dir.cwd().readFileAlloc(io, rest[0], arena, .limited(1 << 28)) catch {
+            const msg = std.fmt.allocPrint(arena, "zash: {s}: No such file or directory\n", .{rest[0]}) catch return 127;
+            return die(msg, 127);
+        };
+    } else {
+        read_stdin = true;
+        source = read_all_fd(arena, 0) catch return 1;
+    }
+
+    interp.setup(sh, env_ptrs, script_name) catch return 1;
+    sh.dash_c = command != null;
+    sh.interactive = interactive;
+    sh.set_pos_args(pos_args) catch return 1;
+    {
+        const set_b = interp.builtins.lookup("set").?;
+        var k: usize = 0;
+        while (k < set_flags.items.len) {
+            if (std.mem.eql(u8, set_flags.items[k][1..], "o")) {
+                const argv = [_][]const u8{ "set", set_flags.items[k], set_flags.items[k + 1] };
+                _ = set_b.run(sh, &argv) catch {};
+                k += 2;
+            } else {
+                const argv = [_][]const u8{ "set", set_flags.items[k] };
+                _ = set_b.run(sh, &argv) catch {};
+                k += 1;
+            }
+        }
+        const sb = interp.builtins.lookup("shopt").?;
+        for (shopt_args.items) |sa| {
+            const argv = [_][]const u8{ "shopt", sa[0], sa[1] };
+            _ = sb.run(sh, &argv) catch {};
         }
     }
 
-    var prefix: []const u8 = "zash: -c";
-    var source: []const u8 = undefined;
-    if (command) |c| {
-        source = c;
-    } else if (script) |path| {
-        prefix = path;
-        source = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 28)) catch {
-            err.print("zash: {s}: No such file or directory\n", .{path}) catch {};
-            return 127;
-        };
-    } else {
-        err.writeAll(usage) catch {};
-        return 2;
+    if (dump_ast or parse_only) {
+        switch (zash.parser.parse(arena, source, .{})) {
+            .err => |e| {
+                var aw = std.Io.Writer.Allocating.init(arena);
+                e.write(&aw.writer, if (command != null) "zash: -c" else script_name) catch {};
+                _ = sys.write_all(2, aw.written());
+                return 2;
+            },
+            .ok => |list| {
+                if (dump_ast) {
+                    var aw = std.Io.Writer.Allocating.init(arena);
+                    zash.ast_dump.dump_list(&aw.writer, list) catch {};
+                    aw.writer.writeByte('\n') catch {};
+                    _ = sys.write_all(1, aw.written());
+                }
+                return 0;
+            },
+        }
     }
 
-    switch (zash.parser.parse(arena, source, .{})) {
-        .err => |e| {
-            e.write(err, prefix) catch {};
-            return 2;
-        },
-        .ok => |list| {
-            if (dump_ast) {
-                zash.ast_dump.dump_list(out, list) catch {};
-                out.writeByte('\n') catch {};
-                return 0;
-            }
-            if (parse_only) return 0;
-            err.writeAll("zash: execution is not implemented yet\n") catch {};
-            return 1;
-        },
-    }
+    const prefix: []const u8 = if (command != null) (std.fmt.allocPrint(arena, "{s}: -c", .{script_name}) catch script_name) else script_name;
+    const status = interp.run_script(sh, source, prefix);
+    return status;
 }
