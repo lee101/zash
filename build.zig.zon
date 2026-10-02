@@ -1,0 +1,7 @@
+.{
+    .name = .zash,
+    .version = "0.0.0",
+    .fingerprint = 0x2ba8fdaccdbce359,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "LICENSE", "README.md" },
+}
