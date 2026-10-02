@@ -16,6 +16,7 @@ pub const Entry = struct {
 
 pub const entries = [_]Entry{
     .{ .name = "head", .run = @import("head.zig").run, .supports = @import("head.zig").supports },
+    .{ .name = "tail", .run = @import("tail.zig").run, .supports = @import("tail.zig").supports },
 };
 
 fn find(name: []const u8) ?*const Entry {
