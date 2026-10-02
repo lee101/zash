@@ -104,24 +104,72 @@ fn do_regex(sh: *Shell, text: []const u8, rx: []const u8) Err!u8 {
     return 0;
 }
 
+fn tr_emit(sh: *Shell, prefix: []const u8, op_text: []const u8) Err!void {
+    var w: std.ArrayList(u8) = .empty;
+    try @import("exec.zig").ps4(sh, &w);
+    try w.appendSlice(sh.sa, "[[ ");
+    try w.appendSlice(sh.sa, prefix);
+    try w.appendSlice(sh.sa, op_text);
+    try w.appendSlice(sh.sa, " ]]\n");
+    _ = sys.write_all(2, w.items);
+}
+
+fn tr_word(sh: *Shell, out: *std.ArrayList(u8), s: []const u8) Err!void {
+    if (s.len == 0) {
+        try out.appendSlice(sh.sa, "''");
+    } else try out.appendSlice(sh.sa, s);
+}
+
+fn pat_display(sh: *Shell, out: *std.ArrayList(u8), pat: []const u8) Err!void {
+    if (pat.len == 0) {
+        try out.appendSlice(sh.sa, "''");
+        return;
+    }
+    try out.appendSlice(sh.sa, pat);
+}
+
 pub fn eval(sh: *Shell, c: *const ast.Cond) CondErr!bool {
+    return eval_p(sh, c, "");
+}
+
+fn eval_p(sh: *Shell, c: *const ast.Cond, prefix: []const u8) CondErr!bool {
+    const tr = sh.opt(.xtrace);
     switch (c.*) {
         .word => |w| {
             const s = try expand.word_string(sh, w);
+            if (tr) {
+                var t: std.ArrayList(u8) = .empty;
+                try t.appendSlice(sh.sa, "-n ");
+                try tr_word(sh, &t, s);
+                try tr_emit(sh, prefix, t.items);
+            }
             return s.len > 0;
         },
-        .not => |n| return !(try eval(sh, n)),
+        .not => |n| {
+            switch (n.*) {
+                .word, .unary, .binary => return !(try eval_p(sh, n, "! ")),
+                else => return !(try eval_p(sh, n, "")),
+            }
+        },
         .and_ => |a| {
-            if (!try eval(sh, a.lhs)) return false;
-            return eval(sh, a.rhs);
+            if (!try eval_p(sh, a.lhs, "")) return false;
+            return eval_p(sh, a.rhs, "");
         },
         .or_ => |a| {
-            if (try eval(sh, a.lhs)) return true;
-            return eval(sh, a.rhs);
+            if (try eval_p(sh, a.lhs, "")) return true;
+            return eval_p(sh, a.rhs, "");
         },
-        .group => |g| return eval(sh, g),
+        .group => |g| return eval_p(sh, g, prefix),
         .unary => |u| {
             const s = try expand.word_string(sh, u.arg);
+            if (tr) {
+                var t: std.ArrayList(u8) = .empty;
+                try t.append(sh.sa, '-');
+                try t.appendSlice(sh.sa, @tagName(u.op));
+                try t.append(sh.sa, ' ');
+                try tr_word(sh, &t, s);
+                try tr_emit(sh, prefix, t.items);
+            }
             return switch (u.op) {
                 .z => s.len == 0,
                 .n => s.len > 0,
@@ -155,16 +203,49 @@ pub fn eval(sh: *Shell, c: *const ast.Cond) CondErr!bool {
             };
         },
         .binary => |b| {
+            const op_text: []const u8 = switch (b.op) {
+                .eq => "=",
+                .eq2 => "==",
+                .ne => "!=",
+                .match => "=~",
+                .lt => "<",
+                .gt => ">",
+                .int_eq => "-eq",
+                .int_ne => "-ne",
+                .int_lt => "-lt",
+                .int_le => "-le",
+                .int_gt => "-gt",
+                .int_ge => "-ge",
+                .nt => "-nt",
+                .ot => "-ot",
+                .ef => "-ef",
+            };
             switch (b.op) {
                 .eq, .eq2, .ne => {
                     const l = try expand.word_string(sh, b.lhs);
                     const pat = try expand.word_pattern(sh, b.rhs);
+                    if (tr) {
+                        var t: std.ArrayList(u8) = .empty;
+                        try tr_word(sh, &t, l);
+                        try t.append(sh.sa, ' ');
+                        try t.appendSlice(sh.sa, op_text);
+                        try t.append(sh.sa, ' ');
+                        try pat_display(sh, &t, try expand.word_pattern_trace(sh, b.rhs));
+                        try tr_emit(sh, prefix, t.items);
+                    }
                     const m = pattern.match(sh.sa, pat, l, .{ .extglob = true, .nocase = sh.shopt(.nocasematch) });
                     return if (b.op == .ne) !m else m;
                 },
                 .match => {
                     const l = try expand.word_string(sh, b.lhs);
                     const rx = try word_regex(sh, b.rhs);
+                    if (tr) {
+                        var t: std.ArrayList(u8) = .empty;
+                        try tr_word(sh, &t, l);
+                        try t.appendSlice(sh.sa, " =~ ");
+                        try pat_display(sh, &t, rx);
+                        try tr_emit(sh, prefix, t.items);
+                    }
                     const r = try do_regex(sh, l, rx);
                     if (r == 2) {
                         sh.status = 2;
@@ -172,40 +253,38 @@ pub fn eval(sh: *Shell, c: *const ast.Cond) CondErr!bool {
                     }
                     return r == 0;
                 },
-                .lt => {
-                    const l = try expand.word_string(sh, b.lhs);
-                    const r = try expand.word_string(sh, b.rhs);
-                    return std.mem.order(u8, l, r) == .lt;
-                },
-                .gt => {
-                    const l = try expand.word_string(sh, b.lhs);
-                    const r = try expand.word_string(sh, b.rhs);
-                    return std.mem.order(u8, l, r) == .gt;
-                },
+                else => {},
+            }
+            const l = try expand.word_string(sh, b.lhs);
+            const r = try expand.word_string(sh, b.rhs);
+            if (tr) {
+                var t: std.ArrayList(u8) = .empty;
+                try tr_word(sh, &t, l);
+                try t.append(sh.sa, ' ');
+                try t.appendSlice(sh.sa, op_text);
+                try t.append(sh.sa, ' ');
+                try tr_word(sh, &t, r);
+                try tr_emit(sh, prefix, t.items);
+            }
+            switch (b.op) {
+                .lt => return std.mem.order(u8, l, r) == .lt,
+                .gt => return std.mem.order(u8, l, r) == .gt,
                 .int_eq, .int_ne, .int_lt, .int_le, .int_gt, .int_ge => {
-                    const ls = try expand.word_string(sh, b.lhs);
-                    const rs = try expand.word_string(sh, b.rhs);
-                    const l = try arith.to_int(sh, ls, .command);
-                    const r = try arith.to_int(sh, rs, .command);
+                    const li = try arith.to_int(sh, l, .command);
+                    const ri = try arith.to_int(sh, r, .command);
                     return switch (b.op) {
-                        .int_eq => l == r,
-                        .int_ne => l != r,
-                        .int_lt => l < r,
-                        .int_le => l <= r,
-                        .int_gt => l > r,
-                        .int_ge => l >= r,
+                        .int_eq => li == ri,
+                        .int_ne => li != ri,
+                        .int_lt => li < ri,
+                        .int_le => li <= ri,
+                        .int_gt => li > ri,
+                        .int_ge => li >= ri,
                         else => unreachable,
                     };
                 },
-                .nt, .ot, .ef => {
-                    const l = try expand.word_string(sh, b.lhs);
-                    const r = try expand.word_string(sh, b.rhs);
-                    return switch (b.op) {
-                        .nt => testops.newer(l, r),
-                        .ot => testops.older(l, r),
-                        else => testops.same_file(l, r),
-                    };
-                },
+                .nt => return testops.newer(l, r),
+                .ot => return testops.older(l, r),
+                else => return testops.same_file(l, r),
             }
         },
     }

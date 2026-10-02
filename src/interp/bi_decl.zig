@@ -285,7 +285,7 @@ pub fn run(sh: *Shell, kind: Kind, items: []const exec.DeclItem) Err!u8 {
         for (rest) |it| {
             const nm = switch (it) {
                 .arg => |s| s,
-                .assign => |as| as.name,
+                .assign => |as| as.a.name,
             };
             const v = sh.vars.get(nm) orelse sh.find(nm) orelse {
                 sh.bmsg(name, "{s}: not found", .{nm});
@@ -363,7 +363,7 @@ fn run_funcs(sh: *Shell, kind: Kind, fl: Flags, rest: []const exec.DeclItem) Err
     for (rest) |it| {
         const nm = switch (it) {
             .arg => |s| s,
-            .assign => |as| as.name,
+            .assign => |as| as.a.name,
         };
         if (kind == .exp and fl.x != null) {
             const f = sh.funcs.get(nm) orelse {
@@ -429,14 +429,14 @@ fn convert_existing_case(sh: *Shell, v: *Var) Err!void {
 fn apply_one(sh: *Shell, name: []const u8, kind: Kind, fl: Flags, it: exec.DeclItem, local_scope: bool) Err!u8 {
     const vname = switch (it) {
         .arg => |s| s,
-        .assign => |as| as.name,
+        .assign => |as| as.a.name,
     };
     if (!Shell.is_valid_name(vname)) {
         const full: []const u8 = switch (it) {
             .arg => |s| s,
             .assign => |as| blk: {
                 var w: unparse.W = .{ .sh = sh, .a = sh.sa };
-                try w.put_assign(as);
+                try w.put_assign(as.a);
                 break :blk w.out.items;
             },
         };
@@ -470,8 +470,8 @@ fn apply_one(sh: *Shell, name: []const u8, kind: Kind, fl: Flags, it: exec.DeclI
     if (fl.A) try sh.declare_assoc(v);
     if (fl.n) |n| {
         if (n) {
-            if (it == .assign and it.assign.value == .scalar) {
-                const target = try exec_word(sh, it.assign.value.scalar);
+            if (it == .assign and it.assign.a.value == .scalar) {
+                const target = it.assign.ex.scalar.?;
                 if (target.len > 0 and !Shell.is_valid_name(strip_sub(target))) {
                     sh.bmsg(name, "`{s}': invalid variable name for name reference", .{target});
                     return 1;
@@ -492,7 +492,7 @@ fn apply_one(sh: *Shell, name: []const u8, kind: Kind, fl: Flags, it: exec.DeclI
     switch (it) {
         .arg => {},
         .assign => |as| {
-            exec.do_assign(sh, as) catch |e| switch (e) {
+            exec.apply_assign(sh, as.a, as.ex) catch |e| switch (e) {
                 error.Abort => return 1,
                 else => return e,
             };

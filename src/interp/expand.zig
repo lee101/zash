@@ -14,7 +14,7 @@ const Allocator = std.mem.Allocator;
 
 pub const ESC: u8 = 1;
 
-pub const Mode = enum { fields, string, pattern };
+pub const Mode = enum { fields, string, pattern, pattern_trace };
 
 const Val = struct {
     set: bool = false,
@@ -55,6 +55,13 @@ const B = struct {
         self.have = true;
         if (text.len == 0) return;
         if (self.mode == .string) return self.cur.appendSlice(self.a, text);
+        if (self.mode == .pattern_trace) {
+            for (text) |c| {
+                try self.cur.append(self.a, ESC);
+                try self.cur.append(self.a, c);
+            }
+            return;
+        }
         for (text) |c| {
             switch (c) {
                 '*', '?', '[', ']', '\\', '(', ')', '|', '!', '+', '@', '-', '^', ESC, '{', '}' => try self.cur.append(self.a, ESC),
@@ -355,6 +362,13 @@ pub fn word_string_unquoted(sh: *Shell, w: ast.Word) Err![]const u8 {
 pub fn word_pattern(sh: *Shell, w: ast.Word) Err![]const u8 {
     var dummy: std.ArrayList([]const u8) = .empty;
     var b = new_builder(sh, .pattern, &dummy);
+    try parts(&b, w.parts, false);
+    return to_pattern(sh.sa, b.cur.items);
+}
+
+pub fn word_pattern_trace(sh: *Shell, w: ast.Word) Err![]const u8 {
+    var dummy: std.ArrayList([]const u8) = .empty;
+    var b = new_builder(sh, .pattern_trace, &dummy);
     try parts(&b, w.parts, false);
     return to_pattern(sh.sa, b.cur.items);
 }
@@ -893,6 +907,14 @@ fn param(b: *B, pe: *const ast.ParamExp, quoted: bool) Err!void {
     var base = try lookup_base(sh, name, sub);
 
     if (pe.length) {
+        if (sub != null and sub.? != .index and sh.opt(.nounset) and !is_special_name(name)) {
+            const vv = sh.find(name);
+            if (vv == null or !(vv.?.value == .indexed or vv.?.value == .assoc)) {
+                sh.msg("{s}: unbound variable", .{name});
+                sh.status = 1;
+                return error.Abort;
+            }
+        }
         if (base.list != null and sub != null) {
             return b.add_result(try sh.tmp_fmt("{d}", .{base.list.?.len}), quoted);
         }

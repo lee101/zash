@@ -182,6 +182,7 @@ fn run_script_inner(sh: *Shell, src: []const u8, label_prefix: []const u8) Err!u
     var p = parser.Parser.init(a, src, .{});
     const res = p.parse_script();
     if (res) |list| {
+        if (sh.dash_c) exec.mark_final_list(sh, list);
         const st = try exec.run_top(sh, list, src);
         return finish(sh, st);
     } else |e| switch (e) {

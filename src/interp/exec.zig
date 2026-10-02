@@ -18,9 +18,20 @@ const Shell = shell.Shell;
 const Err = shell.Err;
 const Allocator = std.mem.Allocator;
 
+pub const Pair = struct { key: ?[]const u8, idx: ?i64 = null, val: []const u8 };
+
+pub const Expanded = struct {
+    scalar: ?[]const u8 = null,
+    sub_key: ?[]const u8 = null,
+    sub_idx: ?i64 = null,
+    pairs: ?[]const Pair = null,
+};
+
+pub const AssignItem = struct { a: ast.Assign, ex: Expanded };
+
 pub const DeclItem = union(enum) {
     arg: []const u8,
-    assign: ast.Assign,
+    assign: AssignItem,
 };
 
 pub fn set_last_arg(sh: *Shell, s: []const u8) void {
@@ -38,13 +49,14 @@ fn is_blank_or_comment(l: []const u8) bool {
     return t.len == 0 or t[0] == '#';
 }
 
-fn verbose_echo(sh: *Shell, src: []const u8, list: ast.List, idx: usize, next_line: *u32) void {
+fn verbose_echo(sh: *Shell, src: []const u8, list: ast.List, idx: usize, next_line: *u32, base: u32) void {
     const item = list.items[idx];
+    const iline: u32 = item.line -| base;
     var end_line: u32 = 0;
     if (idx + 1 < list.items.len and list.items[idx + 1].line > item.line) {
-        end_line = list.items[idx + 1].line - 1;
+        end_line = list.items[idx + 1].line -| base -| 1;
     } else if (idx + 1 < list.items.len) {
-        return;
+        end_line = iline;
     } else {
         end_line = @intCast(std.mem.count(u8, src, "\n") + 1);
     }
@@ -52,9 +64,12 @@ fn verbose_echo(sh: *Shell, src: []const u8, list: ast.List, idx: usize, next_li
     var it = std.mem.splitScalar(u8, src, '\n');
     while (it.next()) |l| lines.append(sh.sa, l) catch return;
     if (lines.items.len > 0 and lines.items[lines.items.len - 1].len == 0) _ = lines.pop();
+    if (lines.items.len == 0) return;
     var e = @min(@as(usize, end_line), lines.items.len);
-    while (e > item.line and is_blank_or_comment(lines.items[e - 1])) e -= 1;
-    var l: usize = @max(next_line.*, 1);
+    while (e > iline and is_blank_or_comment(lines.items[e - 1])) e -= 1;
+    var start: usize = @min(@max(iline, 1), lines.items.len);
+    while (start > 1 and is_blank_or_comment(lines.items[start - 2])) start -= 1;
+    var l: usize = @max(@as(usize, next_line.*), start);
     var out: std.ArrayList(u8) = .empty;
     while (l <= e) : (l += 1) {
         out.appendSlice(sh.sa, lines.items[l - 1]) catch return;
@@ -67,19 +82,23 @@ fn verbose_echo(sh: *Shell, src: []const u8, list: ast.List, idx: usize, next_li
 pub fn run_top(sh: *Shell, list: ast.List, src: []const u8) Err!u8 {
     var status: u8 = sh.status;
     var skip_line: u32 = 0;
-    var next_line: u32 = 1;
+    var next_line: u32 = 0;
     for (list.items, 0..) |item, idx| {
         if (skip_line != 0 and item.line == skip_line) continue;
         skip_line = 0;
         const m = sh.scratch.mark();
-        if (sh.opt(.verbose)) verbose_echo(sh, src, list, idx, &next_line) else if (idx + 1 < list.items.len) {
-            if (list.items[idx + 1].line > item.line) next_line = list.items[idx + 1].line;
-        }
+        if (sh.opt(.verbose)) verbose_echo(sh, src, list, idx, &next_line, 0);
         sh.scratch.release(m);
         status = run_item(sh, item) catch |e| switch (e) {
             error.Abort => {
                 skip_line = item.line;
                 status = sh.status;
+                const ae = sh.abort_errexit;
+                sh.abort_errexit = false;
+                if (sh.opt(.errexit) and status != 0 and ae) {
+                    sh.exit_status_pending = status;
+                    return error.Exit;
+                }
                 continue;
             },
             else => return e,
@@ -134,6 +153,8 @@ pub fn errexit_check(sh: *Shell, status: u8) Err!void {
         defer sh.in_err_trap = false;
         const saved = sh.status;
         sh.status = status;
+        sh.eval_depth += 1;
+        defer sh.eval_depth -= 1;
         try run_trap_text(sh, sh.trap_err.cmd, sh.lineno -| 1);
         sh.status = saved;
     }
@@ -602,7 +623,7 @@ fn run_for(sh: *Shell, f: ast.ForIn) Err!u8 {
     var status: u8 = 0;
     for (items.items) |it| {
         sh.lineno = sh.lineno;
-        if (sh.opt(.xtrace)) try trace_for(sh, "for", f.name, items.items);
+        if (sh.opt(.xtrace)) try trace_for(sh, "for", f.name, f.words);
         try sh.assign_scalar(f.name, it, false);
         const b = try catch_loop(sh, run_list(sh, f.body));
         status = b.st;
@@ -611,16 +632,18 @@ fn run_for(sh: *Shell, f: ast.ForIn) Err!u8 {
     return status;
 }
 
-fn trace_for(sh: *Shell, kw: []const u8, name: []const u8, items: []const []const u8) Err!void {
+fn trace_for(sh: *Shell, kw: []const u8, name: []const u8, words: ?[]const ast.Word) Err!void {
     const m = sh.scratch.mark();
     defer sh.scratch.release(m);
     var w: std.ArrayList(u8) = .empty;
     try ps4(sh, &w);
     try w.print(sh.sa, "{s} {s} in", .{ kw, name });
-    for (items) |it| {
-        try w.append(sh.sa, ' ');
-        try strutil.quote_xtrace(sh.sa, &w, it);
-    }
+    if (words) |ws| {
+        for (ws) |wd| {
+            try w.append(sh.sa, ' ');
+            try w.appendSlice(sh.sa, try unparse.word_source(sh, wd));
+        }
+    } else try w.appendSlice(sh.sa, " \"$@\"");
     try w.append(sh.sa, '\n');
     _ = sys.write_all(2, w.items);
 }
@@ -632,20 +655,37 @@ fn eval_arith_node(sh: *Shell, n: *const ast.Arith, ctx: arith.Ctx) Err!?i64 {
     };
 }
 
+fn trace_arith(sh: *Shell, n: *const ast.Arith) Err!void {
+    var w: std.ArrayList(u8) = .empty;
+    try ps4(sh, &w);
+    try w.appendSlice(sh.sa, "(( ");
+    try arith.render(sh, n, &w);
+    try w.appendSlice(sh.sa, " ))\n");
+    _ = sys.write_all(2, w.items);
+}
+
 fn run_arith_for(sh: *Shell, f: ast.ArithFor) Err!u8 {
-    if (f.init) |n| _ = (try eval_arith_node(sh, n, .command)) orelse return 1;
+    const tr = sh.opt(.xtrace);
+    if (f.init) |n| {
+        if (tr) try trace_arith(sh, n);
+        _ = (try eval_arith_node(sh, n, .command)) orelse return 1;
+    }
     sh.loop_depth += 1;
     defer sh.loop_depth -= 1;
     var status: u8 = 0;
     while (true) {
         if (f.cond) |n| {
+            if (tr) try trace_arith(sh, n);
             const v = (try eval_arith_node(sh, n, .command)) orelse return 1;
             if (v == 0) break;
         }
         const b = try catch_loop(sh, run_list(sh, f.body));
         status = b.st;
         if (b.ctl == .brk) break;
-        if (f.step) |n| _ = (try eval_arith_node(sh, n, .command)) orelse return 1;
+        if (f.step) |n| {
+            if (tr) try trace_arith(sh, n);
+            _ = (try eval_arith_node(sh, n, .command)) orelse return 1;
+        }
     }
     return status;
 }
@@ -666,6 +706,7 @@ fn run_select(sh: *Shell, f: ast.ForIn) Err!u8 {
     var status: u8 = 0;
     var show = true;
     while (true) {
+        if (sh.opt(.xtrace)) try trace_for(sh, "select", f.name, f.words);
         if (show) {
             var out: std.ArrayList(u8) = .empty;
             const cols_s = sh.get_scalar("COLUMNS");
@@ -746,15 +787,15 @@ fn digits_of(n: usize) usize {
 fn run_case(sh: *Shell, cs: ast.Case) Err!u8 {
     const m = sh.scratch.mark();
     defer sh.scratch.release(m);
-    const word = try expand.word_string(sh, cs.word);
     if (sh.opt(.xtrace)) {
         var w: std.ArrayList(u8) = .empty;
         try ps4(sh, &w);
         try w.appendSlice(sh.sa, "case ");
-        try strutil.quote_xtrace(sh.sa, &w, word);
+        try w.appendSlice(sh.sa, try unparse.word_source(sh, cs.word));
         try w.appendSlice(sh.sa, " in\n");
         _ = sys.write_all(2, w.items);
     }
+    const word = try expand.word_string(sh, cs.word);
     const o: @import("pattern.zig").Opts = .{ .extglob = true, .nocase = sh.shopt(.nocasematch) };
     var status: u8 = 0;
     var i: usize = 0;
@@ -790,14 +831,6 @@ fn run_cond(sh: *Shell, cd: *const ast.Cond, c: *const ast.Command) Err!u8 {
         error.ArithError => return 2,
         else => return e,
     };
-    if (sh.opt(.xtrace)) {
-        var w: std.ArrayList(u8) = .empty;
-        try ps4(sh, &w);
-        try w.appendSlice(sh.sa, "[[ ");
-        try cond.trace(sh, cd, &w);
-        try w.appendSlice(sh.sa, " ]]\n");
-        _ = sys.write_all(2, w.items);
-    }
     return if (r) 0 else 1;
 }
 
@@ -883,6 +916,81 @@ pub fn expand_dq_text(sh: *Shell, raw: []const u8) Err![]const u8 {
     }
 }
 
+fn xtrace_decl(sh: *Shell, s: ast.Simple, items: []const DeclItem, assign_vals: []const []const u8) Err!void {
+    var w: std.ArrayList(u8) = .empty;
+    var assoc_flag = false;
+    for (items) |it| {
+        switch (it) {
+            .arg => |a| if (a.len > 1 and a[0] == '-' and std.mem.findScalar(u8, a, 'A') != null) {
+                assoc_flag = true;
+            },
+            else => {},
+        }
+    }
+    for (items) |it| {
+        switch (it) {
+            .assign => |as| if (as.ex.pairs) |pairs| {
+                var is_assoc = assoc_flag;
+                if (sh.find(as.a.name)) |v| {
+                    if (v.value == .assoc) is_assoc = true;
+                }
+                try ps4(sh, &w);
+                try trace_pairs(sh, &w, as.a.name, as.a.append, pairs, is_assoc);
+                try w.append(sh.sa, '\n');
+            },
+            else => {},
+        }
+    }
+    for (s.assigns, 0..) |as, i| {
+        try ps4(sh, &w);
+        try w.appendSlice(sh.sa, as.name);
+        try w.append(sh.sa, '=');
+        if (i < assign_vals.len and assign_vals[i].len > 0) try strutil.quote_xtrace_u(sh.sa, &w, assign_vals[i], sh.utf8);
+        try w.append(sh.sa, '\n');
+    }
+    try ps4(sh, &w);
+    for (items, 0..) |it, i| {
+        if (i > 0) try w.append(sh.sa, ' ');
+        switch (it) {
+            .arg => |a| try strutil.quote_xtrace_u(sh.sa, &w, a, sh.utf8),
+            .assign => |as| {
+                var tok: std.ArrayList(u8) = .empty;
+                try tok.appendSlice(sh.sa, as.a.name);
+                if (as.a.index) |ix| {
+                    try tok.append(sh.sa, '[');
+                    try tok.appendSlice(sh.sa, try unparse.word_source(sh, ix));
+                    try tok.append(sh.sa, ']');
+                }
+                if (as.ex.scalar) |v| {
+                    try tok.appendSlice(sh.sa, if (as.a.append) "+=" else "=");
+                    try tok.appendSlice(sh.sa, v);
+                }
+                try strutil.quote_xtrace_u(sh.sa, &w, tok.items, sh.utf8);
+            },
+        }
+    }
+    try w.append(sh.sa, '\n');
+    const name = if (items.len > 0) switch (items[0]) {
+        .arg => |a| a,
+        else => "",
+    } else "";
+    if (std.mem.eql(u8, name, "export") or std.mem.eql(u8, name, "readonly")) {
+        for (items) |it| {
+            switch (it) {
+                .assign => |as| if (as.ex.scalar) |v| {
+                    try ps4(sh, &w);
+                    try w.appendSlice(sh.sa, as.a.name);
+                    try w.appendSlice(sh.sa, if (as.a.append) "+=" else "=");
+                    if (v.len > 0) try strutil.quote_xtrace_u(sh.sa, &w, v, sh.utf8);
+                    try w.append(sh.sa, '\n');
+                },
+                else => {},
+            }
+        }
+    }
+    _ = sys.write_all(2, w.items);
+}
+
 fn xtrace_simple(sh: *Shell, s: ast.Simple, argv: []const []const u8, assign_vals: []const []const u8) Err!void {
     var w: std.ArrayList(u8) = .empty;
     try ps4(sh, &w);
@@ -893,7 +1001,7 @@ fn xtrace_simple(sh: *Shell, s: ast.Simple, argv: []const []const u8, assign_val
         try w.appendSlice(sh.sa, as.name);
         if (as.index != null) try w.appendSlice(sh.sa, "[..]");
         try w.appendSlice(sh.sa, if (as.append) "+=" else "=");
-        if (i < assign_vals.len) try strutil.quote_xtrace(sh.sa, &w, assign_vals[i]);
+        if (i < assign_vals.len and assign_vals[i].len > 0) try strutil.quote_xtrace_u(sh.sa, &w, assign_vals[i], sh.utf8);
     }
     if (s.assigns.len > 0 and argv.len > 0) {
         try w.append(sh.sa, '\n');
@@ -903,7 +1011,7 @@ fn xtrace_simple(sh: *Shell, s: ast.Simple, argv: []const []const u8, assign_val
     for (argv) |a| {
         if (!first) try w.append(sh.sa, ' ');
         first = false;
-        try strutil.quote_xtrace(sh.sa, &w, a);
+        try strutil.quote_xtrace_u(sh.sa, &w, a, sh.utf8);
     }
     try w.append(sh.sa, '\n');
     _ = sys.write_all(2, w.items);
@@ -1003,61 +1111,126 @@ fn make_decl_assign(sh: *Shell, w: ast.Word) Err!?ast.Assign {
     return .{ .name = sp.name, .index = idx_word, .append = sp.append, .value = value };
 }
 
-fn trace_assign(sh: *Shell, name: []const u8, val: []const u8, append: bool) Err!void {
+fn trace_assign(sh: *Shell, a: ast.Assign, val: []const u8) Err!void {
     var w: std.ArrayList(u8) = .empty;
     try ps4(sh, &w);
-    try w.appendSlice(sh.sa, name);
-    try w.appendSlice(sh.sa, if (append) "+=" else "=");
-    try strutil.quote_xtrace(sh.sa, &w, val);
+    try w.appendSlice(sh.sa, a.name);
+    if (a.index) |ix| {
+        try w.append(sh.sa, '[');
+        try w.appendSlice(sh.sa, try unparse.word_source(sh, ix));
+        try w.append(sh.sa, ']');
+    }
+    try w.appendSlice(sh.sa, if (a.append) "+=" else "=");
+    if (val.len > 0) try strutil.quote_xtrace_u(sh.sa, &w, val, sh.utf8);
     try w.append(sh.sa, '\n');
     _ = sys.write_all(2, w.items);
 }
 
-pub fn do_assign(sh: *Shell, a: ast.Assign) Err!void {
+fn trace_array_source(sh: *Shell, a: ast.Assign, elems: []const ast.ArrayElem) Err!void {
+    var wr: unparse.W = .{ .sh = sh, .a = sh.sa };
+    try ps4(sh, &wr.out);
+    try wr.put(a.name);
+    try wr.put(if (a.append) "+=" else "=");
+    try wr.part(.{ .array_init = elems });
+    try wr.put("\n");
+    _ = sys.write_all(2, wr.out.items);
+}
+
+pub fn trace_pairs(sh: *Shell, w: *std.ArrayList(u8), name: []const u8, append: bool, pairs: []const Pair, assoc: bool) Err!void {
+    try w.appendSlice(sh.sa, name);
+    try w.appendSlice(sh.sa, if (append) "+=(" else "=(");
+    for (pairs, 0..) |p, i| {
+        if (i > 0) try w.append(sh.sa, ' ');
+        if (p.key) |k| {
+            try w.append(sh.sa, '[');
+            if (assoc) {
+                try w.append(sh.sa, '\'');
+                try w.appendSlice(sh.sa, k);
+                try w.append(sh.sa, '\'');
+            } else try w.appendSlice(sh.sa, k);
+            try w.appendSlice(sh.sa, "]=");
+        }
+        try w.append(sh.sa, '\'');
+        for (p.val) |c| {
+            if (c == '\'') try w.appendSlice(sh.sa, "'\\''") else try w.append(sh.sa, c);
+        }
+        try w.append(sh.sa, '\'');
+    }
+    try w.append(sh.sa, ')');
+}
+
+pub fn expand_assign(sh: *Shell, a: ast.Assign) Err!Expanded {
     switch (a.value) {
         .scalar => |w| {
             const val = try expand.word_string(sh, w);
-            if (sh.opt(.xtrace)) try trace_assign(sh, a.name, val, a.append);
+            var ex: Expanded = .{ .scalar = val };
             if (a.index) |ix| {
-                const v = sh.find(a.name) orelse try sh.new_var(a.name);
-                if (v.flags.readonly) return sh.readonly_err(v.name);
-                if (v.value == .assoc) {
-                    return sh.assign_assoc(v, try expand.word_string(sh, ix), val, a.append);
-                }
-                const idx = try expand.index_value(sh, ix);
-                return sh.assign_indexed(v, idx, val, a.append);
+                const v = sh.find(a.name);
+                if (v != null and v.?.value == .assoc) {
+                    ex.sub_key = try expand.word_string(sh, ix);
+                } else ex.sub_idx = try expand.index_value(sh, ix);
             }
-            return sh.assign_scalar(a.name, val, a.append);
+            return ex;
         },
-        .array => |elems| return assign_array(sh, a.name, elems, a.append),
+        .array => |elems| {
+            var pairs: std.ArrayList(Pair) = .empty;
+            for (elems) |e| {
+                if (e.key) |k| {
+                    const val = try expand.word_string(sh, e.value);
+                    try pairs.append(sh.sa, .{ .key = try expand.word_string(sh, k), .val = val });
+                } else {
+                    var fields: std.ArrayList([]const u8) = .empty;
+                    try expand.word_fields(sh, e.value, &fields);
+                    for (fields.items) |f| try pairs.append(sh.sa, .{ .key = null, .idx = null, .val = f });
+                }
+            }
+            return .{ .pairs = pairs.items };
+        },
     }
 }
 
-pub fn assign_array(sh: *Shell, name: []const u8, elems: []const ast.ArrayElem, append: bool) Err!void {
+pub fn apply_assign(sh: *Shell, a: ast.Assign, ex: Expanded) Err!void {
+    if (ex.scalar) |val| {
+        if (a.index != null) {
+            const v = sh.find(a.name) orelse try sh.new_var(a.name);
+            if (v.flags.readonly) return sh.readonly_err(v.name);
+            if (v.value == .assoc) {
+                const key = ex.sub_key orelse try expand.word_string(sh, a.index.?);
+                return sh.assign_assoc(v, key, val, a.append);
+            }
+            const idx = ex.sub_idx orelse try expand.index_value(sh, a.index.?);
+            return sh.assign_indexed(v, idx, val, a.append);
+        }
+        return sh.assign_scalar(a.name, val, a.append);
+    }
+    return apply_pairs(sh, a.name, ex.pairs orelse &.{}, a.append);
+}
+
+pub fn do_assign(sh: *Shell, a: ast.Assign) Err!void {
+    if (sh.opt(.xtrace)) {
+        switch (a.value) {
+            .array => |elems| try trace_array_source(sh, a, elems),
+            else => {},
+        }
+    }
+    const ex = try expand_assign(sh, a);
+    if (sh.opt(.xtrace)) {
+        switch (a.value) {
+            .scalar => try trace_assign(sh, a, ex.scalar.?),
+            else => {},
+        }
+    }
+    return apply_assign(sh, a, ex);
+}
+
+pub fn apply_pairs(sh: *Shell, name: []const u8, pairs: []const Pair, append: bool) Err!void {
     const v = sh.find(name) orelse try sh.new_var(name);
     if (v.flags.readonly) return sh.readonly_err(v.name);
     v.array_set = true;
-    const is_assoc = v.value == .assoc;
-    const Pair = struct { key: ?[]const u8, idx: ?i64, val: []const u8 };
-    var pairs: std.ArrayList(Pair) = .empty;
-    for (elems) |e| {
-        if (e.key) |k| {
-            const val = try expand.word_string(sh, e.value);
-            if (is_assoc) {
-                try pairs.append(sh.sa, .{ .key = try expand.word_string(sh, k), .idx = null, .val = val });
-            } else {
-                try pairs.append(sh.sa, .{ .key = null, .idx = try expand.index_value(sh, k), .val = val });
-            }
-        } else {
-            var fields: std.ArrayList([]const u8) = .empty;
-            try expand.word_fields(sh, e.value, &fields);
-            for (fields.items) |f| try pairs.append(sh.sa, .{ .key = null, .idx = null, .val = f });
-        }
-    }
-    if (is_assoc) {
+    if (v.value == .assoc) {
         if (!append) sh.clear_array(v);
         var pending_key: ?[]const u8 = null;
-        for (pairs.items) |p| {
+        for (pairs) |p| {
             if (p.key) |k| {
                 try sh.assign_assoc(v, k, p.val, false);
             } else if (pending_key) |k| {
@@ -1071,14 +1244,35 @@ pub fn assign_array(sh: *Shell, name: []const u8, elems: []const ast.ArrayElem, 
     try sh.declare_indexed(v);
     if (!append) sh.clear_array(v);
     var next: i64 = v.value.indexed.max_index() + 1;
-    for (pairs.items) |p| {
-        if (p.idx) |i| next = i;
+    for (pairs) |p| {
+        if (p.key) |k| next = try sh.eval_int(k);
         try sh.assign_indexed(v, next, p.val, false);
         next += 1;
     }
 }
 
-fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final: bool) Err!u8 {
+pub fn mark_final_list(sh: *Shell, l: ast.List) void {
+    if (l.items.len == 0) return;
+    const it = l.items[l.items.len - 1];
+    if (it.background) return;
+    mark_final_ao(sh, it.and_or);
+}
+
+pub fn mark_final_ao(sh: *Shell, ao: ast.AndOr) void {
+    if (ao.rest.len != 0) return;
+    const p = ao.first;
+    if (p.negate or p.time != .none or p.commands.len != 1) return;
+    if (p.commands[0].body != .simple) return;
+    if (sh.trap_exit.kind == .cmd and !sh.trap_exit.inherited) return;
+    sh.exec_final_cmd = &p.commands[0];
+}
+
+fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final_in: bool) Err!u8 {
+    var final = final_in;
+    if (sh.exec_final_cmd == c) {
+        sh.exec_final_cmd = null;
+        if (!(sh.trap_exit.kind == .cmd and !sh.trap_exit.inherited)) final = true;
+    }
     sh.lineno = c.line;
     const m = sh.scratch.mark();
     defer sh.scratch.release(m);
@@ -1087,6 +1281,9 @@ fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final: bool) Err
         if (try alias_text(sh, c, s)) |txt| {
             sh.alias_depth += 1;
             defer sh.alias_depth -= 1;
+            const was_v = sh.opt(.verbose);
+            sh.set_opt(.verbose, false);
+            defer sh.set_opt(.verbose, was_v);
             return run_string(sh, txt, .{ .label = "", .line_base = c.line -| 1 });
         }
     }
@@ -1098,7 +1295,8 @@ fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final: bool) Err
         for (s.words, 0..) |w, wi| {
             if (decl_mode) {
                 if (try make_decl_assign(sh, w)) |as| {
-                    try decl.append(sh.sa, .{ .assign = as });
+                    const ex = try expand_assign(sh, as);
+                    try decl.append(sh.sa, .{ .assign = .{ .a = as, .ex = ex } });
                     continue;
                 }
                 const before = argv.items.len;
@@ -1122,6 +1320,7 @@ fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final: bool) Err
         if (c.redirs.len > 0) {
             if (!try redir.apply(sh, c.redirs, &scope)) return 1;
         }
+        set_last_arg(sh, "");
         const st: u8 = sh.cmdsub_status orelse 0;
         sh.status = st;
         if (s.assigns.len > 0 or true) {
@@ -1147,10 +1346,25 @@ fn run_simple(sh: *Shell, c: *const ast.Command, s: ast.Simple, final: bool) Err
             .array => {},
         }
     }
-    if (sh.opt(.xtrace)) try xtrace_simple(sh, s, argv.items, avals.items);
+    if (sh.opt(.xtrace)) {
+        if (decl_mode) try xtrace_decl(sh, s, decl.items, avals.items) else try xtrace_simple(sh, s, argv.items, avals.items);
+    }
     sh.cur_command = argv.items;
     const st = try dispatch(sh, argv.items, decl.items, decl_mode, c.redirs, final);
-    if (argv.items.len > 0) set_last_arg(sh, argv.items[argv.items.len - 1]);
+    if (decl_mode and decl.items.len > 0) {
+        switch (decl.items[decl.items.len - 1]) {
+            .arg => |a| set_last_arg(sh, a),
+            .assign => |as| {
+                var tok: std.ArrayList(u8) = .empty;
+                try tok.appendSlice(sh.sa, as.a.name);
+                if (as.ex.scalar) |v| {
+                    try tok.appendSlice(sh.sa, if (as.a.append) "+=" else "=");
+                    try tok.appendSlice(sh.sa, v);
+                }
+                set_last_arg(sh, tok.items);
+            },
+        }
+    } else if (argv.items.len > 0) set_last_arg(sh, argv.items[argv.items.len - 1]);
     sh.status = st;
     for (sh.procsub_fds.items) |fd| _ = sys.close(fd);
     sh.procsub_fds.clearRetainingCapacity();
@@ -1259,9 +1473,11 @@ pub fn call_function(sh: *Shell, f: *const shell.Func, args: []const []const u8)
     sh.loop_depth = saved_loop;
     if (ret_err == null and sh.trap_return.kind == .cmd and !sh.trap_return.inherited) {
         sh.status = status;
+        sh.eval_depth += 1;
         run_trap_text(sh, sh.trap_return.cmd, sh.lineno -| 1) catch |e| {
             ret_err = e;
         };
+        sh.eval_depth -= 1;
         status = sh.status;
     }
     if (sh.trap_debug.kind == .none) sh.trap_debug = saved_trap_debug;
@@ -1434,28 +1650,23 @@ fn run_as_script(sh: *Shell, path: []const u8, argv: []const []const u8) Err!u8 
     const z = sys.cstr(&buf, path) orelse return 126;
     const fd = sys.open(z, sys.O.RDONLY);
     if (fd < 0) return 126;
-    var content: std.ArrayList(u8) = .empty;
-    var chunk: [8192]u8 = undefined;
-    while (true) {
-        const n = sys.read_some(fd, &chunk);
-        if (n <= 0) break;
-        try content.appendSlice(sh.sa, chunk[0..@intCast(n)]);
-    }
+    var head: [128]u8 = undefined;
+    const n = sys.read_some(fd, &head);
     _ = sys.close(fd);
-    if (std.mem.indexOfScalar(u8, content.items[0..@min(content.items.len, 80)], 0) != null) {
+    if (n > 0 and std.mem.indexOfScalar(u8, head[0..@intCast(n)], 0) != null) {
         sh.msg("{s}: cannot execute binary file: Exec format error", .{path});
         return 126;
     }
-    try sh.set_pos(argv[1..]);
-    sh.in_subshell = true;
-    const old_name = sh.script_name;
-    sh.script_name = try sh.gpa.dupe(u8, path);
-    _ = old_name;
-    sh.cur_file = sh.script_name;
-    return run_source_text(sh, content.items, path, 0) catch |e| switch (e) {
-        error.Exit, error.Abort => sh.status,
-        else => return e,
-    };
+    const a = sh.sa;
+    var args: std.ArrayList([]const u8) = .empty;
+    try args.append(a, "zash");
+    try args.append(a, path);
+    for (argv[1..]) |x| try args.append(a, x);
+    const argz = try make_argv_z(sh, args.items);
+    const env = try sh.env_block_get();
+    _ = sys.execve("/proc/self/exe", argz, @ptrCast(env.ptrs.items.ptr));
+    sh.msg("{s}: cannot execute: {s}", .{ path, sys.msg_for(sys.errno()) });
+    return 126;
 }
 
 fn spawn(sh: *Shell, path: []const u8, argv: []const []const u8, redirs: []const ast.Redirect, final: bool) Err!u8 {
@@ -1552,6 +1763,7 @@ pub fn run_background(sh: *Shell, item: ast.Item) Err!u8 {
                 }
             }
         }
+        mark_final_ao(sh, item.and_or);
         const st = run_and_or(sh, item.and_or) catch |e| switch (e) {
             error.OutOfMemory => 1,
             else => sh.status,
@@ -1615,6 +1827,7 @@ pub fn cmd_subst(sh: *Shell, cs: *const ast.CmdSubst) Err![]const u8 {
         enter_child(sh);
         sh.cmdsub_depth += 1;
         if (!sh.shopt(.inherit_errexit)) sh.set_opt(.errexit, false);
+        mark_final_list(sh, cs.body);
         const st = run_list(sh, cs.body) catch |e| switch (e) {
             error.OutOfMemory => 1,
             else => sh.status,
@@ -1657,6 +1870,19 @@ pub fn read_whole_file(sh: *Shell, path: []const u8) ?[]const u8 {
     return buf.items;
 }
 
+fn high_fd(src: c_int) c_int {
+    var target: c_int = 63;
+    while (target >= 10) : (target -= 1) {
+        if (sys.fcntl(target, sys.F_GETFD) < 0) {
+            if (sys.dup2(src, target) == target) {
+                _ = sys.close(src);
+                return target;
+            }
+        }
+    }
+    return src;
+}
+
 pub fn proc_subst(sh: *Shell, ps: *const ast.ProcSubst) Err![]const u8 {
     var fds: [2]c_int = undefined;
     if (sys.pipe(&fds) != 0) return error.Abort;
@@ -1673,6 +1899,8 @@ pub fn proc_subst(sh: *Shell, ps: *const ast.ProcSubst) Err![]const u8 {
         _ = sys.dup2(fds[theirs], if (ps.input) 1 else 0);
         _ = sys.close(fds[theirs]);
         enter_child(sh);
+        sh.cmdsub_depth += 1;
+        mark_final_list(sh, ps.body);
         const st = run_list(sh, ps.body) catch |e| switch (e) {
             error.OutOfMemory => 1,
             else => sh.status,
@@ -1680,10 +1908,11 @@ pub fn proc_subst(sh: *Shell, ps: *const ast.ProcSubst) Err![]const u8 {
         child_exit(sh, st);
     }
     _ = sys.close(fds[theirs]);
-    try sh.procsub_fds.append(sh.gpa, fds[mine]);
+    const hi = high_fd(fds[mine]);
+    try sh.procsub_fds.append(sh.gpa, hi);
     try sh.add_job(pid, "procsub");
     sh.jobs.items[sh.jobs.items.len - 1].disowned = true;
-    return sh.tmp_fmt("/dev/fd/{d}", .{fds[mine]});
+    return sh.tmp_fmt("/dev/fd/{d}", .{hi});
 }
 
 pub fn check_signals(sh: *Shell) Err!void {
@@ -1697,6 +1926,8 @@ pub fn check_signals(sh: *Shell) Err!void {
             const saved = sh.status;
             sh.in_trap += 1;
             defer sh.in_trap -= 1;
+            sh.eval_depth += 1;
+            defer sh.eval_depth -= 1;
             try run_trap_text(sh, t.cmd, 0);
             sh.status = saved;
         }
@@ -1711,6 +1942,8 @@ fn run_debug_trap(sh: *Shell, c: *const ast.Command) Err!void {
     defer sh.scratch.release(m);
     const text = try unparse.command_source(sh, c);
     sh.bash_command = text;
+    sh.eval_depth += 1;
+    defer sh.eval_depth -= 1;
     try run_trap_text(sh, sh.trap_debug.cmd, c.line -| 1);
     sh.status = saved;
 }
@@ -1762,12 +1995,18 @@ pub fn run_string(sh: *Shell, src: []const u8, o: StringOpts) Err!u8 {
     };
     const saved_line = sh.lineno;
     defer sh.lineno = saved_line;
-    return run_top_inner(sh, list);
+    return run_top_inner(sh, list, src_copy, o.line_base);
 }
 
-fn run_top_inner(sh: *Shell, list: ast.List) Err!u8 {
+fn run_top_inner(sh: *Shell, list: ast.List, src: []const u8, base: u32) Err!u8 {
     var status: u8 = sh.status;
-    for (list.items) |item| {
+    var next_line: u32 = 0;
+    for (list.items, 0..) |item, idx| {
+        if (sh.opt(.verbose)) {
+            const m = sh.scratch.mark();
+            verbose_echo(sh, src, list, idx, &next_line, base);
+            sh.scratch.release(m);
+        }
         status = try run_item(sh, item);
         try check_signals(sh);
     }

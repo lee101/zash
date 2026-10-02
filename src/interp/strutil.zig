@@ -84,8 +84,30 @@ pub fn quote_for_at_q(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Allo
     return single_quote(a, out, s);
 }
 
+fn xtrace_needs_ansic(s: []const u8, utf8: bool) bool {
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c >= 0x80) {
+            if (!utf8) return true;
+            const l = seq_len(c, s.len - i);
+            if (std.unicode.utf8ValidateSlice(s[i .. i + l]) == false) return true;
+            i += l;
+            continue;
+        }
+        if ((c < 0x20 and c != '\t' and c != '\n') or c == 0x7f) return true;
+        i += 1;
+    }
+    return false;
+}
+
 pub fn quote_xtrace(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Allocator.Error!void {
+    return quote_xtrace_u(a, out, s, false);
+}
+
+pub fn quote_xtrace_u(a: Allocator, out: *std.ArrayList(u8), s: []const u8, utf8: bool) Allocator.Error!void {
     if (s.len == 0) return out.appendSlice(a, "''");
+    if (xtrace_needs_ansic(s, utf8)) return ansi_quote_octal(a, out, s);
     var plain = true;
     for (s, 0..) |c, i| {
         switch (c) {
@@ -99,6 +121,30 @@ pub fn quote_xtrace(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Alloca
     }
     if (plain) return out.appendSlice(a, s);
     return single_quote(a, out, s);
+}
+
+pub fn ansi_quote_octal(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Allocator.Error!void {
+    try out.appendSlice(a, "$'");
+    for (s) |c| {
+        switch (c) {
+            '\'' => try out.appendSlice(a, "\\'"),
+            '\\' => try out.appendSlice(a, "\\\\"),
+            '\n' => try out.appendSlice(a, "\\n"),
+            '\t' => try out.appendSlice(a, "\\t"),
+            '\r' => try out.appendSlice(a, "\\r"),
+            0x07 => try out.appendSlice(a, "\\a"),
+            0x08 => try out.appendSlice(a, "\\b"),
+            0x0b => try out.appendSlice(a, "\\v"),
+            0x0c => try out.appendSlice(a, "\\f"),
+            0x1b => try out.appendSlice(a, "\\E"),
+            else => {
+                if (c < 0x20 or c >= 0x7f) {
+                    try out.print(a, "\\{o:0>3}", .{c});
+                } else try out.append(a, c);
+            },
+        }
+    }
+    try out.append(a, '\'');
 }
 
 pub fn quote_printf_q(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Allocator.Error!void {

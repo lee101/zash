@@ -243,6 +243,8 @@ pub const Shell = struct {
     cur_cmd: ?*const ast.Command = null,
     cwd_logical: []u8 = &.{},
     alias_depth: u32 = 0,
+    abort_errexit: bool = false,
+    exec_final_cmd: ?*const ast.Command = null,
     alias_lines: std.StringHashMapUnmanaged(u32) = .empty,
     pending_sig: c_int = 0,
     pending_funcs: std.StringHashMapUnmanaged([]u8) = .empty,
@@ -379,7 +381,7 @@ pub const Shell = struct {
     }
 
     pub fn xtrace_level(self: *const Shell) u32 {
-        return self.cmdsub_depth + 1;
+        return self.cmdsub_depth + self.eval_depth + self.in_source_depth + 1;
     }
 
     pub fn set_pos_args(self: *Shell, args: []const []const u8) Err!void {
@@ -506,6 +508,7 @@ pub const Shell = struct {
     pub fn readonly_err(self: *Shell, name: []const u8) Err {
         self.msg("{s}: readonly variable", .{name});
         self.status = 1;
+        self.abort_errexit = true;
         return error.Abort;
     }
 
