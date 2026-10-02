@@ -3,6 +3,8 @@ const Io = std.Io;
 const common = @import("common.zig");
 const regex = @import("regex.zig");
 const uni = @import("uni.zig");
+const ucp = @import("ucp.zig");
+const unicode_sets = @import("unicode_sets.zig");
 const Ctx = common.Ctx;
 const Stdio = common.Stdio;
 
@@ -300,7 +302,7 @@ fn checkSupported(argv: []const []const u8, env: ?*const common.EnvView) bool {
         const re = regex.Regex.compile(std.heap.page_allocator, pats.items, regexOptions(cfg, utf8)) catch return false;
         defer re.deinit();
         if (cfg.word and re.can_be_empty) return false;
-        if (utf8 and (re.sensitive or cfg.word)) return false;
+        if (utf8 and re.sensitive) return false;
         if (re.nfa.states.items.len > 20000) return false;
     }
     return true;
@@ -477,8 +479,24 @@ const Searcher = struct {
         return self.wordFind(line, 0) != null;
     }
 
-    fn isWordAt(line: []const u8, i: usize) bool {
-        return i < line.len and (std.ascii.isAlphanumeric(line[i]) or line[i] == '_');
+    fn isWordAt(self: *const Searcher, line: []const u8, i: usize) bool {
+        if (i >= line.len) return false;
+        const c = line[i];
+        if (c < 0x80 or !self.utf8) return std.ascii.isAlphanumeric(c) or c == '_';
+        const n = std.unicode.utf8ByteSequenceLength(c) catch return false;
+        if (i + n > line.len) return false;
+        const cp = std.unicode.utf8Decode(line[i..][0..n]) catch return false;
+        return ucp.inTable(&unicode_sets.glibc_word_ranges, cp);
+    }
+
+    fn isWordBefore(self: *const Searcher, line: []const u8, s: usize) bool {
+        if (s == 0) return false;
+        var k = s - 1;
+        if (self.utf8) {
+            var back: usize = 0;
+            while (k > 0 and back < 3 and line[k] & 0xc0 == 0x80) : (back += 1) k -= 1;
+        }
+        return self.isWordAt(line, k);
     }
 
     fn wordFind(self: *Searcher, line: []const u8, from: usize) ?regex.Match {
@@ -492,7 +510,7 @@ const Searcher = struct {
             var len = m.end - s;
             while (true) {
                 const e = s + len;
-                if ((s == 0 or !isWordAt(line, s - 1)) and (e == line.len or !isWordAt(line, e))) return .{ .start = s, .end = e };
+                if (!self.isWordBefore(line, s) and !self.isWordAt(line, e)) return .{ .start = s, .end = e };
                 if (len == 0) break;
                 len -= 1;
                 if (len < from) break;

@@ -118,7 +118,10 @@ def cases(fx):
                 yield Case(["grep", "-v", pat, f], env=env)
                 yield Case(["grep", "-vn", "-C1", pat, f], env=env)
                 yield Case(["grep", "-a", pat, f], env=env)
-        yield Case(["grep", "-w", "foo", "utf8mix"], env=env, unsupported=True)
+        for pat in ["foo", "caf", "\u00e9", "na", "bar", "\u00fcber", "\u0431"]:
+            for o in [["-w"], ["-wo"], ["-wc"], ["-wv"]]:
+                for f in ["utf8mix", "unitext", "invalid8"]:
+                    yield Case(["grep"] + o + [pat, f], env=env)
         for pat in ["caf\u00e9", "\u00c9cole", "\u00fcber", "stra\u00dfe", "strasse", "istanbul", "\u0130stanbul", "s", "k", "\u03c3", "\u03a3", "\u03b1\u03b2", "\u043f\u0440\u0438\u0432\u0435\u0442", "[[:alpha:]]\\+", "[[:upper:]]", "[[:lower:]]\\+", "[[:digit:]]", "[[:alnum:]]*", "[[:punct:]]", "[[:space:]]", "\\w\\+", "\\W", "\\s", "\\S\\+", "[\u00e9\u00e8]", "[^\u00e9a-z ]", "\u00e9*", "\u4e2d.", ".\u6587", "x.", "^.\\{3\\}$", "[[:print:]]*", "[[:graph:]]\\+", "[[:cntrl:]]", "[[:blank:]]", "\u00b2", "\u2467", "[0-9]\\+"]:
             for f in ["unitext", "utf8mix", "invalid8"]:
                 for o in [[], ["-o"], ["-c"], ["-i"], ["-io"], ["-v"], ["-ion"], ["-E"], ["-Eo"], ["-F"], ["-Fi"], ["-x"], ["-ix"]]:

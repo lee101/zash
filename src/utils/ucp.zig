@@ -211,6 +211,20 @@ pub fn utf8Sequences(a: Allocator, lo_in: u32, hi_in: u32, out: *std.ArrayList(S
     }.lt);
 }
 
+pub fn inTable(table: []const [2]u32, cp: u32) bool {
+    var lo: usize = 0;
+    var hi: usize = table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (cp < table[mid][0]) {
+            hi = mid;
+        } else if (cp > table[mid][1]) {
+            lo = mid + 1;
+        } else return true;
+    }
+    return false;
+}
+
 pub const Charset = enum { glibc, rust };
 
 pub fn classTable(cs: Charset, name: []const u8) ?[]const [2]u32 {
