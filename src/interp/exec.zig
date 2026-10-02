@@ -93,13 +93,11 @@ pub fn run_top(sh: *Shell, list: ast.List, src: []const u8) Err!u8 {
             error.Abort => {
                 skip_line = item.line;
                 status = sh.status;
-                if (sh.dash_c) {
-                    if (sh.opt(.errexit) and status != 0 and sh.abort_errexit) {
-                        sh.exit_status_pending = status;
-                        return error.Exit;
-                    }
+                if (sh.dash_c and sh.abort_eof) {
+                    sh.abort_eof = false;
                     return status;
                 }
+                sh.abort_eof = false;
                 const ae = sh.abort_errexit;
                 sh.abort_errexit = false;
                 if (sh.opt(.errexit) and status != 0 and ae) {
@@ -397,15 +395,12 @@ fn run_multi(sh: *Shell, p: ast.Pipeline) Err!u8 {
     return result;
 }
 
-pub fn wait_raw(sh: *Shell, pid: c_int) ?c_int {
+pub fn wait_raw(_: *Shell, pid: c_int) ?c_int {
     var st: c_int = 0;
     while (true) {
         const r = sys.waitpid(pid, &st, 0);
         if (r < 0) {
-            if (sys.errno() == sys.EINTR) {
-                check_signals(sh) catch {};
-                continue;
-            }
+            if (sys.errno() == sys.EINTR) continue;
             return null;
         }
         break;

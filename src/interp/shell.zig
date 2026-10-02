@@ -244,6 +244,7 @@ pub const Shell = struct {
     cwd_logical: []u8 = &.{},
     alias_depth: u32 = 0,
     abort_errexit: bool = false,
+    abort_eof: bool = false,
     exec_final_cmd: ?*const ast.Command = null,
     alias_lines: std.StringHashMapUnmanaged(u32) = .empty,
     pending_sig: c_int = 0,

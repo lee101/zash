@@ -646,7 +646,10 @@ fn array_keys(sh: *Shell, v: *shell.Var) Err![]const []const u8 {
 
 pub fn index_value(sh: *Shell, w: ast.Word) Err!i64 {
     const text = try word_string(sh, w);
-    return arith.eval_string(sh, text);
+    return arith.eval_string(sh, text) catch |err| {
+        if (err == error.Abort) sh.abort_eof = true;
+        return err;
+    };
 }
 
 pub fn lookup_base(sh: *Shell, name: []const u8, sub: ?ast.Subscript) Err!Val {
