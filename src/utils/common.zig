@@ -242,20 +242,36 @@ pub fn errnoText(e: anyerror) []const u8 {
     };
 }
 
-pub fn isUtf8Locale(env: *const EnvView) bool {
-    const v = env.get("LC_ALL") orelse env.get("LC_CTYPE") orelse env.get("LANG") orelse return false;
-    if (v.len == 0) return false;
+pub fn effectiveLocale(env: *const EnvView, category: []const u8) ?[]const u8 {
+    if (env.get("LC_ALL")) |v| if (v.len > 0) return v;
+    if (env.get(category)) |v| if (v.len > 0) return v;
+    if (env.get("LANG")) |v| if (v.len > 0) return v;
+    return null;
+}
+
+pub const LocaleKind = enum { c, utf8, other };
+
+fn kindOf(v: ?[]const u8) LocaleKind {
+    const name = v orelse return .c;
+    if (std.mem.eql(u8, name, "C") or std.mem.eql(u8, name, "POSIX")) return .c;
     var i: usize = 0;
-    while (i + 4 <= v.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(v[i..][0..4], "utf8")) return true;
-        if (i + 5 <= v.len and std.ascii.eqlIgnoreCase(v[i..][0..5], "utf-8")) return true;
+    while (i + 4 <= name.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(name[i..][0..4], "utf8")) return .utf8;
+        if (i + 5 <= name.len and std.ascii.eqlIgnoreCase(name[i..][0..5], "utf-8")) return .utf8;
     }
-    return false;
+    return .other;
+}
+
+pub fn ctypeKind(env: *const EnvView) LocaleKind {
+    return kindOf(effectiveLocale(env, "LC_CTYPE"));
+}
+
+pub fn isUtf8Locale(env: *const EnvView) bool {
+    return ctypeKind(env) == .utf8;
 }
 
 pub fn localeIsCLike(env: *const EnvView, comptime category: []const u8) bool {
-    const v = env.get("LC_ALL") orelse env.get(category) orelse env.get("LANG") orelse return true;
-    if (v.len == 0) return true;
+    const v = effectiveLocale(env, category) orelse return true;
     return std.mem.eql(u8, v, "C") or std.mem.eql(u8, v, "POSIX") or
         std.mem.eql(u8, v, "C.UTF-8") or std.mem.eql(u8, v, "C.utf8") or std.mem.eql(u8, v, "C.UTF8");
 }

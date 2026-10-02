@@ -231,8 +231,24 @@ def main():
             mod = importlib.import_module(u)
             stats = Stats()
             t0 = time.time()
-            for case in mod.cases(fx):
-                check(u, case, fx, stats, a.v)
+            import concurrent.futures, threading
+            lock = threading.Lock()
+
+            class LockedStats(Stats):
+                pass
+
+            def work(case):
+                local = Stats()
+                check(u, case, fx, local, a.v)
+                with lock:
+                    stats.total += local.total
+                    stats.passed += local.passed
+                    stats.unsupported += local.unsupported
+                    stats.failed += local.failed
+                    stats.fails += local.fails
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
+                list(ex.map(work, mod.cases(fx)))
             print("%-8s total=%d pass=%d fail=%d unsupported-skipped=%d (%.1fs)" % (u, stats.total, stats.passed, stats.failed, stats.unsupported, time.time() - t0))
             for case, why in stats.fails[:a.maxfail]:
                 print("  FAIL %r stdin=%r: %s" % (case.args, (case.stdin or b"")[:40], why))

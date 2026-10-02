@@ -17,6 +17,7 @@ pub const Entry = struct {
 pub const entries = [_]Entry{
     .{ .name = "head", .run = @import("head.zig").run, .supports = @import("head.zig").supports },
     .{ .name = "cat", .run = @import("cat.zig").run, .supports = @import("cat.zig").supports },
+    .{ .name = "wc", .run = @import("wc.zig").run, .supports = @import("wc.zig").supports, .supports_env = @import("wc.zig").supportsEnv },
     .{ .name = "tail", .run = @import("tail.zig").run, .supports = @import("tail.zig").supports },
 };
 
