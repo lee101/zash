@@ -92,7 +92,7 @@ pub const ParseError = struct {
     detail: []const u8 = "",
     src_line: []const u8 = "",
 
-    pub const Kind = enum { unexpected_token, unexpected_eof, eof_matching, eof_looking, cond_syntax, nesting };
+    pub const Kind = enum { unexpected_token, unexpected_eof, eof_matching, eof_looking, cond_syntax, arith_for, nesting };
 
     pub fn write(self: ParseError, w: *std.Io.Writer, prefix: []const u8) std.Io.Writer.Error!void {
         switch (self.kind) {
@@ -115,6 +115,10 @@ pub const ParseError = struct {
                 if (self.detail.len > 0) try w.print("{s}: line {d}: {s}\n", .{ prefix, self.line, self.detail });
                 try w.print("{s}: line {d}: syntax error near `{s}'\n", .{ prefix, self.line, self.text });
                 try w.print("{s}: line {d}: `{s}'\n", .{ prefix, self.line, self.src_line });
+            },
+            .arith_for => {
+                try w.print("{s}: line {d}: syntax error: {s}\n", .{ prefix, self.line, self.detail });
+                try w.print("{s}: line {d}: syntax error: `{s}'\n", .{ prefix, self.line, self.text });
             },
             .nesting => {
                 try w.print("{s}: line {d}: syntax error: maximum nesting level exceeded\n", .{ prefix, self.line });
@@ -229,6 +233,11 @@ pub const Lexer = struct {
         return error.Syntax;
     }
 
+    pub fn fail_newline(self: *Lexer) Error {
+        const at: u32 = @intCast(if (self.orig.len > 0 and self.orig[self.orig.len - 1] == '\n') self.orig.len - 1 else self.orig.len);
+        return self.fail_unexpected(.{ .tag = .newline, .start = at, .end = at });
+    }
+
     pub fn fail_matching(self: *Lexer, ch: []const u8, at: usize) Error {
         if (self.err != null) return error.Syntax;
         self.err = .{
@@ -263,6 +272,18 @@ pub const Lexer = struct {
             .text = text,
             .detail = detail,
             .src_line = self.line_text(tok.start),
+        };
+        return error.Syntax;
+    }
+
+    pub fn fail_arith_for(self: *Lexer, detail: []const u8, from: usize, to: usize) Error {
+        if (self.err != null) return error.Syntax;
+        self.err = .{
+            .kind = .arith_for,
+            .line = self.line_at(from),
+            .col = self.col_at(from),
+            .text = self.orig[from..@min(to, self.orig.len)],
+            .detail = detail,
         };
         return error.Syntax;
     }

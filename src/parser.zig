@@ -238,7 +238,7 @@ pub const Parser = struct {
                 }
             } else break;
         }
-        if (time != .none and self.at_cmd_end()) return .{ .commands = &.{}, .negate = negate, .time = time };
+        if ((time != .none or negate) and self.at_cmd_end()) return .{ .commands = &.{}, .negate = negate, .time = time };
         const base = self.cmds.items.len;
         const pbase = self.pipes.items.len;
         const c1 = try self.parse_command();
@@ -373,6 +373,7 @@ pub const Parser = struct {
             else => return self.unexpected(),
         };
         try self.advance(false);
+        if (self.tok.tag == .eof) return self.lex.fail_newline();
         if (self.tok.tag != .word) return self.unexpected();
         var r = ast.Redirect{ .fd = fd, .op = op, .target = self.cur_word() };
         if (op == .heredoc or op == .heredoc_strip) {
@@ -459,6 +460,7 @@ pub const Parser = struct {
     fn parse_function_def(self: *Parser, name: []const u8, keyword: bool, line: u32) Error!ast.Command {
         if (self.tok.tag == .lparen) {
             try self.advance(false);
+            if (self.tok.tag == .eof) return self.lex.fail_newline();
             if (self.tok.tag != .rparen) return self.unexpected();
             try self.advance(true);
         } else if (!keyword) return self.unexpected();
@@ -472,6 +474,7 @@ pub const Parser = struct {
     fn parse_function_kw(self: *Parser) Error!ast.Command {
         const line = self.lex.line_at(self.tok.start);
         try self.advance(false);
+        if (self.tok.tag == .eof) return self.lex.fail_newline();
         if (self.tok.tag != .word) return self.unexpected();
         const name = self.lex.orig[self.tok.start..self.tok.end];
         try self.advance(false);
@@ -565,11 +568,22 @@ pub const Parser = struct {
             try self.advance(true);
             try self.skip_newlines();
         }
+        const body = try self.parse_loop_body();
+        const fi = ast.ForIn{ .name = name, .words = words, .body = body };
+        return .{ .body = if (is_select) .{ .select = fi } else .{ .for_in = fi } };
+    }
+
+    fn parse_loop_body(self: *Parser) Error!ast.List {
+        if (self.is_kw(.kw_lbrace)) {
+            try self.advance(true);
+            const body = try self.parse_list(true);
+            try self.expect_kw(.kw_rbrace);
+            return body;
+        }
         try self.expect_kw(.kw_do);
         const body = try self.parse_list(true);
         try self.expect_kw(.kw_done);
-        const fi = ast.ForIn{ .name = name, .words = words, .body = body };
-        return .{ .body = if (is_select) .{ .select = fi } else .{ .for_in = fi } };
+        return body;
     }
 
     fn parse_arith_for(self: *Parser) Error!ast.Command {
@@ -585,10 +599,9 @@ pub const Parser = struct {
             for (0..3) |i| {
                 var stop = end;
                 if (i < 2) {
-                    stop = lx.extent(pos, ';', ';') orelse {
-                        lx.pos = pos;
-                        return self.unexpected();
-                    };
+                    stop = lx.extent(pos, ';', ';') orelse return lx.fail_arith_for("arithmetic expression required", s, end + 2);
+                } else if (lx.extent(pos, ';', ';') != null) {
+                    return lx.fail_arith_for("`;' unexpected", s, end + 2);
                 }
                 const text = lx.src[pos..stop];
                 if (std.mem.trim(u8, text, " \t\n").len > 0) exprs[i] = try arith_parse.parse_region(lx, pos, stop);
@@ -599,9 +612,7 @@ pub const Parser = struct {
         try self.advance(true);
         if (self.tok.tag == .semi) try self.advance(true);
         try self.skip_newlines();
-        try self.expect_kw(.kw_do);
-        const body = try self.parse_list(true);
-        try self.expect_kw(.kw_done);
+        const body = try self.parse_loop_body();
         return .{ .body = .{ .arith_for = .{ .init = exprs[0], .cond = exprs[1], .step = exprs[2], .body = body } } };
     }
 
@@ -635,6 +646,7 @@ pub const Parser = struct {
             try self.advance(true);
             const body = try self.parse_list(false);
             var term: ast.CaseTerm = .break_;
+            var terminated = true;
             switch (self.tok.tag) {
                 .dsemi => {
                     try self.advance(false);
@@ -647,11 +659,11 @@ pub const Parser = struct {
                     term = .test_next;
                     try self.advance(false);
                 },
-                else => {},
+                else => terminated = false,
             }
             try self.case_clauses.append(self.alloc(), .{ .patterns = patterns, .body = body, .term = term });
             if (self.is_kw(.kw_esac)) break;
-            if (self.tok.tag == .eof) return self.unexpected();
+            if (!terminated) return self.unexpected();
         }
         try self.expect_kw(.kw_esac);
         const clauses = try self.alloc().dupe(ast.CaseClause, self.case_clauses.items[base..]);
@@ -680,6 +692,7 @@ pub const Parser = struct {
 
     fn parse_coproc(self: *Parser) Error!ast.Command {
         try self.advance(false);
+        if (self.tok.tag == .eof) return self.lex.fail_newline();
         var name: ?[]const u8 = null;
         if (self.tok.tag == .word and self.tok.kw == .none and try self.peek_second_starts_compound()) {
             name = self.lex.orig[self.tok.start..self.tok.end];
@@ -744,6 +757,7 @@ pub const Parser = struct {
         const c = try self.parse_cond_or(open);
         if (!self.is_kw(.kw_drbracket)) {
             if (self.tok.tag == .eof) return self.lex.fail_looking("]]", open);
+            if (self.tok.tag == .word) return self.lex.fail_cond("syntax error in conditional expression", self.tok);
             return self.cond_fail("syntax error in conditional expression: unexpected token `{s}'", .{self.tok_text(self.tok)}, self.tok);
         }
         try self.advance(true);
@@ -798,6 +812,11 @@ pub const Parser = struct {
             return self.mk_cond(.{ .group = e });
         }
         if (self.tok.tag == .eof) return self.lex.fail_looking("]]", open);
+        if (self.tok.tag == .or_if or self.tok.tag == .and_if) {
+            var near = self.tok;
+            near.end = near.start + 1;
+            return self.cond_fail("unexpected token `{s}' in conditional command", .{self.tok_text(self.tok)}, near);
+        }
         if (self.tok.tag != .word) return self.cond_fail("syntax error in conditional expression: unexpected token `{s}'", .{self.tok_text(self.tok)}, self.tok);
         if (self.tok.kw == .kw_drbracket) return self.lex.fail_cond("", self.tok);
         const first = self.cur_word();
@@ -856,8 +875,676 @@ fn expect_dump(src: []const u8, want: []const u8) !void {
     }
 }
 
-test "smoke" {
-    try expect_dump("echo hi", "(list (cmd \"echo\" \"hi\"))");
+fn expect_error(src: []const u8, want: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    switch (parse(arena.allocator(), src, .{})) {
+        .ok => {
+            std.debug.print("src: {s}\nexpected a syntax error\n", .{src});
+            return error.TestUnexpectedResult;
+        },
+        .err => |e| {
+            var buf: [2048]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            try e.write(&w, "zash: -c");
+            std.testing.expectEqualStrings(want, w.buffered()) catch |err| {
+                std.debug.print("src: {s}\n", .{src});
+                return err;
+            };
+        },
+    }
+}
+
+test "dump lists and pipelines" {
+    const cases = [_][2][]const u8{
+        .{ "echo hello world", "(list (cmd \"echo\" \"hello\" \"world\"))" },
+        .{ "echo a;echo b", "(list (cmd \"echo\" \"a\") (cmd \"echo\" \"b\"))" },
+        .{ "echo a & echo b", "(list (& (cmd \"echo\" \"a\")) (cmd \"echo\" \"b\"))" },
+        .{ "a && b || c", "(list (&& (|| (cmd \"a\") (cmd \"b\")) (cmd \"c\")))" },
+        .{ "a || b && c", "(list (|| (&& (cmd \"a\") (cmd \"b\")) (cmd \"c\")))" },
+        .{ "a && b && c", "(list (&& (&& (cmd \"a\") (cmd \"b\")) (cmd \"c\")))" },
+        .{ "a | b | c", "(list (pipe (cmd \"a\") | (cmd \"b\") | (cmd \"c\")))" },
+        .{ "a |& b | c", "(list (pipe (cmd \"a\") |& (cmd \"b\") | (cmd \"c\")))" },
+        .{ "! a | b", "(list (! (pipe (cmd \"a\") | (cmd \"b\"))))" },
+        .{ "! ! a", "(list (cmd \"a\"))" },
+        .{ "time a | b", "(list (time (pipe (cmd \"a\") | (cmd \"b\"))))" },
+        .{ "time -p a", "(list (time-p (cmd \"a\")))" },
+        .{ "time", "(list (time (empty)))" },
+        .{ "time ! a", "(list (! (time (cmd \"a\"))))" },
+        .{ "a &", "(list (& (cmd \"a\")))" },
+        .{ "a & b &", "(list (& (cmd \"a\")) (& (cmd \"b\")))" },
+        .{ "a;", "(list (cmd \"a\"))" },
+        // error case skipped: 'a;;'
+        .{ "( a; b )", "(list (sub (list (cmd \"a\") (cmd \"b\"))))" },
+        .{ "(a)&", "(list (& (sub (list (cmd \"a\")))))" },
+        .{ "{ a; b; }", "(list (grp (list (cmd \"a\") (cmd \"b\"))))" },
+        .{ "{ a; } > f 2>&1", "(list (R (grp (list (cmd \"a\"))) (r > \"f\") (r 2 >& \"1\")))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump compound commands" {
+    const cases = [_][2][]const u8{
+        .{ "if a; then b; fi", "(list (if (list (cmd \"a\")) (list (cmd \"b\"))))" },
+        .{ "if a; then b; else c; fi", "(list (if (list (cmd \"a\")) (list (cmd \"b\")) (else (list (cmd \"c\")))))" },
+        .{ "if a; then b; elif c; then d; elif e; then f; else g; fi", "(list (if (list (cmd \"a\")) (list (cmd \"b\")) (elif (list (cmd \"c\")) (list (cmd \"d\"))) (elif (list (cmd \"e\")) (list (cmd \"f\"))) (else (list (cmd \"g\")))))" },
+        .{ "if a\nthen\n  b\nfi", "(list (if (list (cmd \"a\")) (list (cmd \"b\"))))" },
+        .{ "if a; then b; fi | c", "(list (pipe (if (list (cmd \"a\")) (list (cmd \"b\"))) | (cmd \"c\")))" },
+        .{ "if ! a; then b; fi", "(list (if (list (! (cmd \"a\"))) (list (cmd \"b\"))))" },
+        .{ "while a; do b; done", "(list (while (list (cmd \"a\")) (list (cmd \"b\"))))" },
+        .{ "until a; do b; done", "(list (until (list (cmd \"a\")) (list (cmd \"b\"))))" },
+        .{ "while a && b; do c; d; done", "(list (while (list (&& (cmd \"a\") (cmd \"b\"))) (list (cmd \"c\") (cmd \"d\"))))" },
+        .{ "for i in 1 2 3; do echo $i; done", "(list (for \"i\" (in \"1\" \"2\" \"3\") (list (cmd \"echo\" (w (v i))))))" },
+        .{ "for i in; do :; done", "(list (for \"i\" (in) (list (cmd \":\"))))" },
+        .{ "for i; do :; done", "(list (for \"i\" (list (cmd \":\"))))" },
+        .{ "for i in $(ls) \"a b\" *.c; do :; done", "(list (for \"i\" (in (w (cs (list (cmd \"ls\")))) (w (dq \"a b\")) \"*.c\") (list (cmd \":\"))))" },
+        .{ "for i\nin a b\ndo :\ndone", "(list (for \"i\" (in \"a\" \"b\") (list (cmd \":\"))))" },
+        .{ "for ((i=0;i<3;i++)); do echo $i; done", "(list (for-arith (= i 0) (< i 3) (post++ i) (list (cmd \"echo\" (w (v i))))))" },
+        .{ "for ((;;)); do break; done", "(list (for-arith _ _ _ (list (cmd \"break\"))))" },
+        .{ "for ((i=0, j=10; i<j; i++, j--)) do :; done", "(list (for-arith (, (= i 0) (= j 10)) (< i j) (, (post++ i) (post-- j)) (list (cmd \":\"))))" },
+        .{ "select x in a b; do break; done", "(list (select \"x\" (in \"a\" \"b\") (list (cmd \"break\"))))" },
+        .{ "select x; do break; done", "(list (select \"x\" (list (cmd \"break\"))))" },
+        .{ "case x in a) echo a;; b|c) echo bc;; *) echo other;; esac", "(list (case \"x\" ((\"a\") (list (cmd \"echo\" \"a\"))) ((\"b\" \"c\") (list (cmd \"echo\" \"bc\"))) ((\"*\") (list (cmd \"echo\" \"other\")))))" },
+        .{ "case x in a) echo a ;& b) echo b ;;& c) : ;; esac", "(list (case \"x\" ((\"a\") (list (cmd \"echo\" \"a\")) ;&) ((\"b\") (list (cmd \"echo\" \"b\")) ;;&) ((\"c\") (list (cmd \":\")))))" },
+        .{ "case x in (a) :;; (b|c) :;; esac", "(list (case \"x\" ((\"a\") (list (cmd \":\"))) ((\"b\" \"c\") (list (cmd \":\")))))" },
+        .{ "case x in esac", "(list (case \"x\"))" },
+        .{ "case x in a) ;; esac", "(list (case \"x\" ((\"a\") (list))))" },
+        .{ "case \"$x\" in 'a b'|\"c d\"|e*f|[0-9]*) : ;; esac", "(list (case (w (dq (v x))) (((w (q \"a b\")) (w (dq \"c d\")) \"e*f\" \"[0-9]*\") (list (cmd \":\")))))" },
+        // error case skipped: 'case x in a) echo a esac'
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump functions" {
+    const cases = [_][2][]const u8{
+        .{ "f() { echo hi; }", "(list (fn \"f\" (grp (list (cmd \"echo\" \"hi\")))))" },
+        .{ "f ( ) { echo hi; }", "(list (fn \"f\" (grp (list (cmd \"echo\" \"hi\")))))" },
+        .{ "f() ( echo hi )", "(list (fn \"f\" (sub (list (cmd \"echo\" \"hi\")))))" },
+        .{ "f() if a; then b; fi", "(list (fn \"f\" (if (list (cmd \"a\")) (list (cmd \"b\")))))" },
+        .{ "f() [[ a ]]", "(list (fn \"f\" (cond \"a\")))" },
+        .{ "f() { :; } > /dev/null", "(list (fn \"f\" (R (grp (list (cmd \":\"))) (r > \"/dev/null\"))))" },
+        .{ "function f { echo hi; }", "(list (fn-kw \"f\" (grp (list (cmd \"echo\" \"hi\")))))" },
+        .{ "function f() { echo hi; }", "(list (fn-kw \"f\" (grp (list (cmd \"echo\" \"hi\")))))" },
+        .{ "function f ( ) { echo hi; }", "(list (fn-kw \"f\" (grp (list (cmd \"echo\" \"hi\")))))" },
+        .{ "function f\n{\n  echo hi\n}", "(list (fn-kw \"f\" (grp (list (cmd \"echo\" \"hi\")))))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump conditionals" {
+    const cases = [_][2][]const u8{
+        .{ "[[ a == b ]]", "(list (cond (== \"a\" \"b\")))" },
+        .{ "[[ a = b ]]", "(list (cond (= \"a\" \"b\")))" },
+        .{ "[[ a != b ]]", "(list (cond (!= \"a\" \"b\")))" },
+        .{ "[[ a < b ]]", "(list (cond (< \"a\" \"b\")))" },
+        .{ "[[ a > b ]]", "(list (cond (> \"a\" \"b\")))" },
+        .{ "[[ -f x ]]", "(list (cond (-f \"x\")))" },
+        .{ "[[ -n $x && -z $y ]]", "(list (cond (&& (-n (w (v x))) (-z (w (v y))))))" },
+        .{ "[[ -f x || -d y && -e z ]]", "(list (cond (|| (-f \"x\") (&& (-d \"y\") (-e \"z\")))))" },
+        .{ "[[ ! -f x ]]", "(list (cond (! (-f \"x\"))))" },
+        .{ "[[ ( a == b || c == d ) && e ]]", "(list (cond (&& (grp (|| (== \"a\" \"b\") (== \"c\" \"d\"))) \"e\")))" },
+        .{ "[[ $a =~ ^[0-9]+$ ]]", "(list (cond (=~ (w (v a)) \"^[0-9]+$\")))" },
+        .{ "[[ $a =~ (a|b)+ ]]", "(list (cond (=~ (w (v a)) \"(a|b)+\")))" },
+        .{ "[[ a -eq 1 && b -ne 2 && c -lt 3 && d -le 4 && e -gt 5 && f -ge 6 ]]", "(list (cond (&& (&& (&& (&& (&& (-eq \"a\" \"1\") (-ne \"b\" \"2\")) (-lt \"c\" \"3\")) (-le \"d\" \"4\")) (-gt \"e\" \"5\")) (-ge \"f\" \"6\"))))" },
+        .{ "[[ a -nt b || a -ot b || a -ef b ]]", "(list (cond (|| (|| (-nt \"a\" \"b\") (-ot \"a\" \"b\")) (-ef \"a\" \"b\"))))" },
+        .{ "[[ a == @(x|y) ]]", "(list (cond (== \"a\" \"@(x|y)\")))" },
+        .{ "[[ a == \"x y\" ]]", "(list (cond (== \"a\" (w (dq \"x y\")))))" },
+        .{ "[[ -v x ]]", "(list (cond (-v \"x\")))" },
+        .{ "[[ word ]]", "(list (cond \"word\"))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump arithmetic commands" {
+    const cases = [_][2][]const u8{
+        .{ "(( 1 + 2 ))", "(list (arith-cmd (+ 1 2)))" },
+        .{ "(( x = 5, y = x * 2 ))", "(list (arith-cmd (, (= x 5) (= y (* x 2)))))" },
+        .{ "(( x++ ))", "(list (arith-cmd (post++ x)))" },
+        .{ "((x<3)) && echo y", "(list (&& (arith-cmd (< x 3)) (cmd \"echo\" \"y\")))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump assignments" {
+    const cases = [_][2][]const u8{
+        .{ "a=1", "(list (cmd (= a \"1\")))" },
+        .{ "a=1 b=2 cmd arg", "(list (cmd (= a \"1\") (= b \"2\") \"cmd\" \"arg\"))" },
+        .{ "a=1 b=2", "(list (cmd (= a \"1\") (= b \"2\")))" },
+        .{ "a=", "(list (cmd (= a (w))))" },
+        .{ "a= cmd", "(list (cmd (= a (w)) \"cmd\"))" },
+        .{ "a=$b", "(list (cmd (= a (w (v b)))))" },
+        .{ "a=\"x y\"", "(list (cmd (= a (w (dq \"x y\")))))" },
+        .{ "a=$(cmd)", "(list (cmd (= a (w (cs (list (cmd \"cmd\")))))))" },
+        .{ "a=~/x", "(list (cmd (= a (w (tilde \"\") \"/x\"))))" },
+        .{ "a=~:~/x", "(list (cmd (= a (w (tilde \"\") \":\" (tilde \"\") \"/x\"))))" },
+        .{ "a=(1 2 3)", "(list (cmd (= a (arr \"1\" \"2\" \"3\"))))" },
+        .{ "a=()", "(list (cmd (= a (arr))))" },
+        .{ "a=(1 [5]=2 \"x y\" $b)", "(list (cmd (= a (arr \"1\" (kv \"5\" \"2\") (w (dq \"x y\")) (w (v b))))))" },
+        .{ "a+=(4 5)", "(list (cmd (+= a (arr \"4\" \"5\"))))" },
+        .{ "a+=x", "(list (cmd (+= a \"x\")))" },
+        .{ "a[1]=x", "(list (cmd (= a[\"1\"] \"x\")))" },
+        .{ "a[i+1]=x", "(list (cmd (= a[\"i+1\"] \"x\")))" },
+        .{ "a[1]+=x", "(list (cmd (+= a[\"1\"] \"x\")))" },
+        .{ "a=([x]=1 [y]=2)", "(list (cmd (= a (arr (kv \"x\" \"1\") (kv \"y\" \"2\")))))" },
+        .{ "a=(\n1\n2 # c\n3\n)", "(list (cmd (= a (arr \"1\" \"2\" \"3\"))))" },
+        .{ "declare -a arr=(1 2 3)", "(list (cmd \"declare\" \"-a\" (w \"arr=\" (arr \"1\" \"2\" \"3\"))))" },
+        .{ "local x=1 y=(a b)", "(list (cmd \"local\" (w \"x=\" \"1\") (w \"y=\" (arr \"a\" \"b\"))))" },
+        .{ "export A=1 B=$(c)", "(list (cmd \"export\" (w \"A=\" \"1\") (w \"B=\" (cs (list (cmd \"c\"))))))" },
+        .{ "echo a=b c=d", "(list (cmd \"echo\" \"a=b\" \"c=d\"))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump redirections" {
+    const cases = [_][2][]const u8{
+        .{ "cmd > f", "(list (cmd \"cmd\" (r > \"f\")))" },
+        .{ "cmd >> f", "(list (cmd \"cmd\" (r >> \"f\")))" },
+        .{ "cmd < f", "(list (cmd \"cmd\" (r < \"f\")))" },
+        .{ "cmd 2> f", "(list (cmd \"cmd\" (r 2 > \"f\")))" },
+        .{ "cmd 2>&1", "(list (cmd \"cmd\" (r 2 >& \"1\")))" },
+        .{ "cmd >&2", "(list (cmd \"cmd\" (r >& \"2\")))" },
+        .{ "cmd 1>&2", "(list (cmd \"cmd\" (r 1 >& \"2\")))" },
+        .{ "cmd &> f", "(list (cmd \"cmd\" (r &> \"f\")))" },
+        .{ "cmd &>> f", "(list (cmd \"cmd\" (r &>> \"f\")))" },
+        .{ "cmd <<< word", "(list (cmd \"cmd\" (r <<< \"word\")))" },
+        .{ "cmd <<< \"a b $c\"", "(list (cmd \"cmd\" (r <<< (w (dq \"a b \" (v c))))))" },
+        .{ "cmd <> f", "(list (cmd \"cmd\" (r <> \"f\")))" },
+        .{ "cmd >| f", "(list (cmd \"cmd\" (r >| \"f\")))" },
+        .{ "cmd {fd}> f", "(list (cmd \"cmd\" (r {fd} > \"f\")))" },
+        .{ "cmd {fd}>&-", "(list (cmd \"cmd\" (r {fd} >& \"-\")))" },
+        .{ "cmd 2>&-", "(list (cmd \"cmd\" (r 2 >& \"-\")))" },
+        .{ "cmd <&0", "(list (cmd \"cmd\" (r <& \"0\")))" },
+        .{ "cmd 3< f 4> g", "(list (cmd \"cmd\" (r 3 < \"f\") (r 4 > \"g\")))" },
+        .{ "> f", "(list (cmd (r > \"f\")))" },
+        .{ ">f cmd arg", "(list (cmd \"cmd\" \"arg\" (r > \"f\")))" },
+        .{ "cmd >f arg >g", "(list (cmd \"cmd\" \"arg\" (r > \"f\") (r > \"g\")))" },
+        .{ "cmd 10>f", "(list (cmd \"cmd\" (r 10 > \"f\")))" },
+        .{ "cmd 2>/dev/null | cat", "(list (pipe (cmd \"cmd\" (r 2 > \"/dev/null\")) | (cmd \"cat\")))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump heredocs" {
+    const cases = [_][2][]const u8{
+        .{ "cat <<EOF\nhello $x\n`date`\n$(cmd)\n\\$notvar\nEOF", "(list (cmd \"cat\" (r << \"EOF\" u (w \"hello \" (v x) \"\\n\" (bt (list (cmd \"date\"))) \"\\n\" (cs (list (cmd \"cmd\"))) \"\\n$notvar\\n\"))))" },
+        .{ "cat <<EOF\nEOF", "(list (cmd \"cat\" (r << \"EOF\" u (w))))" },
+        .{ "cat <<-EOF\n\thello\n\t\tthere\n\tEOF", "(list (cmd \"cat\" (r <<- \"EOF\" u (w \"hello\\nthere\\n\"))))" },
+        .{ "cat <<'EOF'\n$x `y`\nEOF", "(list (cmd \"cat\" (r << \"EOF\" q (w (q \"$x `y`\\n\")))))" },
+        .{ "cat <<\"EOF\"\n$x\nEOF", "(list (cmd \"cat\" (r << \"EOF\" q (w (q \"$x\\n\")))))" },
+        .{ "cat <<\\EOF\n$x\nEOF", "(list (cmd \"cat\" (r << \"EOF\" q (w (q \"$x\\n\")))))" },
+        .{ "cat <<EOF1 <<EOF2\na\nEOF1\nb\nEOF2", "(list (cmd \"cat\" (r << \"EOF1\" u (w \"a\\n\")) (r << \"EOF2\" u (w \"b\\n\"))))" },
+        .{ "cat <<EOF | wc -l\na\nb\nEOF", "(list (pipe (cmd \"cat\" (r << \"EOF\" u (w \"a\\nb\\n\"))) | (cmd \"wc\" \"-l\")))" },
+        .{ "cat <<EOF && echo done\na\nEOF", "(list (&& (cmd \"cat\" (r << \"EOF\" u (w \"a\\n\"))) (cmd \"echo\" \"done\")))" },
+        .{ "echo \"$(cat <<EOF\nx\nEOF\n)\"", "(list (cmd \"echo\" (w (dq (cs (list (cmd \"cat\" (r << \"EOF\" u (w \"x\\n\")))))))))" },
+        .{ "cat <<EOF\na\\\nb\nEOF", "(list (cmd \"cat\" (r << \"EOF\" u (w \"ab\\n\"))))" },
+        .{ "cat <<EOF\na\nEOF\necho after", "(list (cmd \"cat\" (r << \"EOF\" u (w \"a\\n\"))) (cmd \"echo\" \"after\"))" },
+        .{ "cat <<EOF\nno terminator", "(list (cmd \"cat\" (r << \"EOF\" u (w \"no terminator\"))))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump parameter expansion" {
+    const cases = [_][2][]const u8{
+        .{ "echo ${x}", "(list (cmd \"echo\" (w (v x))))" },
+        .{ "echo ${x:-y} ${x:=y} ${x:?y} ${x:+y}", "(list (cmd \"echo\" (w (p x (:- \"y\"))) (w (p x (:= \"y\"))) (w (p x (:? \"y\"))) (w (p x (:+ \"y\")))))" },
+        .{ "echo ${x-y} ${x=y} ${x?y} ${x+y}", "(list (cmd \"echo\" (w (p x (- \"y\"))) (w (p x (= \"y\"))) (w (p x (? \"y\"))) (w (p x (+ \"y\")))))" },
+        .{ "echo ${x:-} ${x:-a b} ${x:-\"a b\"} ${x:-'a b'} ${x:-$y} ${x:-${y:-z}}", "(list (cmd \"echo\" (w (p x (:- (w)))) (w (p x (:- \"a b\"))) (w (p x (:- (w (dq \"a b\"))))) (w (p x (:- (w (q \"a b\"))))) (w (p x (:- (w (v y))))) (w (p x (:- (w (p y (:- \"z\"))))))))" },
+        .{ "echo \"${x:-'a'}\"", "(list (cmd \"echo\" (w (dq (p x (:- \"'a'\"))))))" },
+        .{ "echo ${#x} ${#} ${#1} ${#@} ${#x[@]} ${#x[1]}", "(list (cmd \"echo\" (w (p len x)) (w (v #)) (w (p len 1)) (w (p len @)) (w (p len x[@])) (w (p len x[\"1\"]))))" },
+        .{ "echo ${!x} ${!x[@]} ${!x[*]} ${!pre*} ${!pre@}", "(list (cmd \"echo\" (w (p ind x)) (w (p ind x[@])) (w (p ind x[*])) (w (p ind pre (names *))) (w (p ind pre (names @)))))" },
+        .{ "echo ${x[@]} ${x[*]} ${x[1]} ${x[$i]} ${x[\"k\"]} ${x[i+1]}", "(list (cmd \"echo\" (w (p x[@])) (w (p x[*])) (w (p x[\"1\"])) (w (p x[(w (v i))])) (w (p x[(w (dq \"k\"))])) (w (p x[\"i+1\"]))))" },
+        .{ "echo ${x%y} ${x%%y} ${x#y} ${x##y} ${x%.*} ${x##*/}", "(list (cmd \"echo\" (w (p x (% \"y\"))) (w (p x (%% \"y\"))) (w (p x (# \"y\"))) (w (p x (## \"y\"))) (w (p x (% \".*\"))) (w (p x (## \"*/\")))))" },
+        .{ "echo ${x/y/z} ${x//y/z} ${x/#y/z} ${x/%y/z} ${x/y} ${x//y} ${x/y/}", "(list (cmd \"echo\" (w (p x (/ \"y\" \"z\"))) (w (p x (// \"y\" \"z\"))) (w (p x (/# \"y\" \"z\"))) (w (p x (/% \"y\" \"z\"))) (w (p x (/ \"y\"))) (w (p x (// \"y\"))) (w (p x (/ \"y\" (w))))))" },
+        .{ "echo ${x//[/]/_}", "(list (cmd \"echo\" (w (p x (// \"[\" \"]/_\")))))" },
+        .{ "echo ${x^} ${x^^} ${x,} ${x,,} ${x^^[aeiou]}", "(list (cmd \"echo\" (w (p x (^))) (w (p x (^^))) (w (p x (,))) (w (p x (,,))) (w (p x (^^ \"[aeiou]\")))))" },
+        .{ "echo ${x:1} ${x:1:2} ${x: -1} ${x:1:-1} ${x:$a:$b} ${x:a+1:b*2}", "(list (cmd \"echo\" (w (p x (sub 1))) (w (p x (sub 1 2))) (w (p x (sub (neg 1)))) (w (p x (sub 1 (neg 1)))) (w (p x (sub (exp (w (v a))) (exp (w (v b)))))) (w (p x (sub (+ a 1) (* b 2))))))" },
+        .{ "echo ${x[@]:1:2}", "(list (cmd \"echo\" (w (p x[@] (sub 1 2)))))" },
+        .{ "echo ${x@Q} ${x@E} ${x@P} ${x@A} ${x@a} ${x@U} ${x@u} ${x@L}", "(list (cmd \"echo\" (w (p x (@ Q))) (w (p x (@ E))) (w (p x (@ P))) (w (p x (@ A))) (w (p x (@ a))) (w (p x (@ U))) (w (p x (@ u))) (w (p x (@ L)))))" },
+        .{ "echo ${1} ${10} ${@} ${*} ${?} ${-} ${$} ${!} ${_}", "(list (cmd \"echo\" (w (v 1)) (w (v 10)) (w (v @)) (w (v *)) (w (v ?)) (w (v -)) (w (v $)) (w (v !)) (w (v _))))" },
+        .{ "echo $x $1 $@ $* $# $? $- $$ $! $0 $_ $x_y1", "(list (cmd \"echo\" (w (v x)) (w (v 1)) (w (v @)) (w (v *)) (w (v #)) (w (v ?)) (w (v -)) (w (v $)) (w (v !)) (w (v 0)) (w (v _)) (w (v x_y1))))" },
+        .{ "echo $", "(list (cmd \"echo\" \"$\"))" },
+        .{ "echo \"$\"", "(list (cmd \"echo\" (w (dq \"$\"))))" },
+        .{ "echo $x.y $x-y ${x}y", "(list (cmd \"echo\" (w (v x) \".y\") (w (v x) \"-y\") (w (v x) \"y\")))" },
+        .{ "echo ${}", "(list (cmd \"echo\" (w (bad \"${}\"))))" },
+        .{ "echo ${x@}", "(list (cmd \"echo\" (w (bad \"${x@}\"))))" },
+        .{ "echo ${x:}", "(list (cmd \"echo\" (w (p x (sub 0)))))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump substitutions" {
+    const cases = [_][2][]const u8{
+        .{ "echo $(a) `a`", "(list (cmd \"echo\" (w (cs (list (cmd \"a\")))) (w (bt (list (cmd \"a\"))))))" },
+        .{ "echo $(a $(b))", "(list (cmd \"echo\" (w (cs (list (cmd \"a\" (w (cs (list (cmd \"b\"))))))))))" },
+        .{ "echo `a \\`b\\``", "(list (cmd \"echo\" (w (bt (list (cmd \"a\" (w (bt (list (cmd \"b\"))))))))))" },
+        .{ "echo `a \\\\ b`", "(list (cmd \"echo\" (w (bt (list (cmd \"a\" (w (q \" \") \"b\")))))))" },
+        .{ "echo \"a $(b) `c` ${d}\"", "(list (cmd \"echo\" (w (dq \"a \" (cs (list (cmd \"b\"))) \" \" (bt (list (cmd \"c\"))) \" \" (v d)))))" },
+        .{ "echo \"a $(echo \")\")\"", "(list (cmd \"echo\" (w (dq \"a \" (cs (list (cmd \"echo\" (w (dq \")\")))))))))" },
+        .{ "echo $(echo a; echo b)", "(list (cmd \"echo\" (w (cs (list (cmd \"echo\" \"a\") (cmd \"echo\" \"b\"))))))" },
+        .{ "echo $(\na\nb\n)", "(list (cmd \"echo\" (w (cs (list (cmd \"a\") (cmd \"b\"))))))" },
+        .{ "echo $(case x in x) echo hi;; esac)", "(list (cmd \"echo\" (w (cs (list (case \"x\" ((\"x\") (list (cmd \"echo\" \"hi\")))))))))" },
+        .{ "echo $(a # c ) \n)", "(list (cmd \"echo\" (w (cs (list (cmd \"a\"))))))" },
+        .{ "echo <(a) >(b) <(a | b)", "(list (cmd \"echo\" (w (psi (list (cmd \"a\")))) (w (pso (list (cmd \"b\")))) (w (psi (list (pipe (cmd \"a\") | (cmd \"b\")))))))" },
+        .{ "diff <(a) <(b)", "(list (cmd \"diff\" (w (psi (list (cmd \"a\")))) (w (psi (list (cmd \"b\"))))))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump brace tilde and quoting" {
+    const cases = [_][2][]const u8{
+        .{ "echo {a,b,c}", "(list (cmd \"echo\" (w (brace \"a\" \"b\" \"c\"))))" },
+        .{ "echo {1..5} {a..e} {1..10..2} {a..z..3} {01..10} {-3..3}", "(list (cmd \"echo\" (w (seq \"1\" \"5\")) (w (seqc \"a\" \"e\")) (w (seq \"1\" \"10\" \"2\")) (w (seqc \"a\" \"z\" \"3\")) (w (seq \"01\" \"10\")) (w (seq \"-3\" \"3\"))))" },
+        .{ "echo a{b,c}d {x,y}{1,2}", "(list (cmd \"echo\" (w \"a\" (brace \"b\" \"c\") \"d\") (w (brace \"x\" \"y\") (brace \"1\" \"2\"))))" },
+        .{ "echo {a,{b,c},d}", "(list (cmd \"echo\" (w (brace \"a\" (w (brace \"b\" \"c\")) \"d\"))))" },
+        .{ "echo {a,b}$x", "(list (cmd \"echo\" (w (brace \"a\" \"b\") (v x))))" },
+        .{ "echo {a}", "(list (cmd \"echo\" \"{a}\"))" },
+        .{ "echo {a,b", "(list (cmd \"echo\" \"{a,b\"))" },
+        .{ "echo {}", "(list (cmd \"echo\" \"{}\"))" },
+        .{ "echo { a }", "(list (cmd \"echo\" \"{\" \"a\" \"}\"))" },
+        .{ "echo {,a}", "(list (cmd \"echo\" (w (brace (w) \"a\"))))" },
+        .{ "echo ~ ~/x ~root ~root/x ~+ ~-", "(list (cmd \"echo\" (w (tilde \"\")) (w (tilde \"\") \"/x\") (w (tilde \"root\")) (w (tilde \"root\") \"/x\") (w (tilde \"+\")) (w (tilde \"-\"))))" },
+        .{ "echo a~b \"~\" '~' \\~", "(list (cmd \"echo\" \"a~b\" (w (dq \"~\")) (w (q \"~\")) (w (q \"~\"))))" },
+        .{ "echo a\\ b 'c d' \"e f\" a\\'b", "(list (cmd \"echo\" (w \"a\" (q \" \") \"b\") (w (q \"c d\")) (w (dq \"e f\")) (w \"a\" (q \"'\") \"b\")))" },
+        .{ "echo \"a\\\"b\" \"a\\$b\" \"a\\\\b\" \"a\\nb\" \"a\\`b\"", "(list (cmd \"echo\" (w (dq \"a\\\"b\")) (w (dq \"a$b\")) (w (dq \"a\\\\b\")) (w (dq \"a\\\\nb\")) (w (dq \"a`b\"))))" },
+        .{ "echo 'a\\b'", "(list (cmd \"echo\" (w (q \"a\\\\b\"))))" },
+        .{ "echo $'a\\tb\\n' $'\\x41\\101é' $'it\\'s'", "(list (cmd \"echo\" (w (ansi \"a\\tb\\n\")) (w (ansi \"AAé\")) (w (ansi \"it's\"))))" },
+        .{ "echo $\"hello\"", "(list (cmd \"echo\" (w (dq \"hello\"))))" },
+        .{ "echo a\"b\"c'd'e", "(list (cmd \"echo\" (w \"a\" (dq \"b\") \"c\" (q \"d\") \"e\")))" },
+        .{ "echo \"a\nb\"", "(list (cmd \"echo\" (w (dq \"a\\nb\"))))" },
+        .{ "echo a # comment", "(list (cmd \"echo\" \"a\"))" },
+        .{ "# comment\necho a", "(list (cmd \"echo\" \"a\"))" },
+        .{ "echo a#b", "(list (cmd \"echo\" \"a#b\"))" },
+        .{ "echo a \\\nb", "(list (cmd \"echo\" \"a\" \"b\"))" },
+        .{ "echo a\\\nb", "(list (cmd \"echo\" \"ab\"))" },
+        .{ "echo \"a\\\nb\"", "(list (cmd \"echo\" (w (dq \"ab\"))))" },
+        .{ "a;b;c", "(list (cmd \"a\") (cmd \"b\") (cmd \"c\"))" },
+        .{ "a\nb\nc", "(list (cmd \"a\") (cmd \"b\") (cmd \"c\"))" },
+        .{ "\n\na\n", "(list (cmd \"a\"))" },
+        .{ "{ echo a; } | { cat; }", "(list (pipe (grp (list (cmd \"echo\" \"a\"))) | (grp (list (cmd \"cat\")))))" },
+        .{ "( a ) | ( b )", "(list (pipe (sub (list (cmd \"a\"))) | (sub (list (cmd \"b\")))))" },
+        .{ "while a; do b; done | c", "(list (pipe (while (list (cmd \"a\")) (list (cmd \"b\"))) | (cmd \"c\")))" },
+        .{ "while a; do b; done > f", "(list (R (while (list (cmd \"a\")) (list (cmd \"b\"))) (r > \"f\")))" },
+        .{ "for i in 1; do :; done 2>&1 | cat", "(list (pipe (R (for \"i\" (in \"1\") (list (cmd \":\"))) (r 2 >& \"1\")) | (cmd \"cat\")))" },
+        .{ "if a; then b; fi > f 2>&1", "(list (R (if (list (cmd \"a\")) (list (cmd \"b\"))) (r > \"f\") (r 2 >& \"1\")))" },
+        .{ "case x in a) b;; esac > f", "(list (R (case \"x\" ((\"a\") (list (cmd \"b\")))) (r > \"f\")))" },
+        .{ "f() { :; }; f", "(list (fn \"f\" (grp (list (cmd \":\")))) (cmd \"f\"))" },
+        .{ "echo }", "(list (cmd \"echo\" \"}\"))" },
+        // error case skipped: 'echo { a; }'
+        .{ "echo [[ ]]", "(list (cmd \"echo\" \"[[\" \"]]\"))" },
+        .{ "echo ]]", "(list (cmd \"echo\" \"]]\"))" },
+        .{ "echo !", "(list (cmd \"echo\" \"!\"))" },
+        .{ "echo ! a", "(list (cmd \"echo\" \"!\" \"a\"))" },
+        .{ "echo a!b", "(list (cmd \"echo\" \"a!b\"))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump arithmetic expansion" {
+    const cases = [_][2][]const u8{
+        .{ "echo $((1+2))", "(list (cmd \"echo\" (w (arith (+ 1 2)))))" },
+        .{ "echo $((1 + 2 * 3 - 4 / 5 % 6))", "(list (cmd \"echo\" (w (arith (- (+ 1 (* 2 3)) (% (/ 4 5) 6))))))" },
+        .{ "echo $((2 ** 3 ** 2))", "(list (cmd \"echo\" (w (arith (** 2 (** 3 2))))))" },
+        .{ "echo $((-x)) $((+x)) $((!x)) $((~x)) $((- -x))", "(list (cmd \"echo\" (w (arith (neg x))) (w (arith (pos x))) (w (arith (! x))) (w (arith (~ x))) (w (arith (neg (neg x))))))" },
+        .{ "echo $((x++)) $((x--)) $((++x)) $((--x))", "(list (cmd \"echo\" (w (arith (post++ x))) (w (arith (post-- x))) (w (arith (pre++ x))) (w (arith (pre-- x)))))" },
+        .{ "echo $((a?b:c)) $((a?b?c:d:e)) $((a?b:c?d:e))", "(list (cmd \"echo\" (w (arith (? a b c))) (w (arith (? a (? b c d) e))) (w (arith (? a b (? c d e))))))" },
+        .{ "echo $((a=1)) $((a+=1)) $((a-=1)) $((a*=1)) $((a/=1)) $((a%=1)) $((a<<=1)) $((a>>=1)) $((a&=1)) $((a^=1)) $((a|=1))", "(list (cmd \"echo\" (w (arith (= a 1))) (w (arith (+= a 1))) (w (arith (-= a 1))) (w (arith (*= a 1))) (w (arith (/= a 1))) (w (arith (%= a 1))) (w (arith (<<= a 1))) (w (arith (>>= a 1))) (w (arith (&= a 1))) (w (arith (^= a 1))) (w (arith (|= a 1)))))" },
+        .{ "echo $((a,b)) $((a=1,b=2))", "(list (cmd \"echo\" (w (arith (, a b))) (w (arith (, (= a 1) (= b 2))))))" },
+        .{ "echo $((a<b)) $((a<=b)) $((a>b)) $((a>=b)) $((a==b)) $((a!=b))", "(list (cmd \"echo\" (w (arith (< a b))) (w (arith (<= a b))) (w (arith (> a b))) (w (arith (>= a b))) (w (arith (== a b))) (w (arith (!= a b)))))" },
+        .{ "echo $((a&&b||c)) $((a||b&&c)) $((a&b|c^d))", "(list (cmd \"echo\" (w (arith (|| (&& a b) c))) (w (arith (|| a (&& b c)))) (w (arith (| (& a b) (^ c d))))))" },
+        .{ "echo $((a<<1)) $((a>>1)) $((a<<1+1))", "(list (cmd \"echo\" (w (arith (<< a 1))) (w (arith (>> a 1))) (w (arith (<< a (+ 1 1))))))" },
+        .{ "echo $((0x1f)) $((017)) $((2#101)) $((64#a)) $((16#FF))", "(list (cmd \"echo\" (w (arith 31)) (w (arith 15)) (w (arith 5)) (w (arith 10)) (w (arith 255))))" },
+        .{ "echo $((08)) $((1a))", "(list (cmd \"echo\" (w (arith (badnum \"08\"))) (w (arith (badnum \"1a\")))))" },
+        .{ "echo $((a[1])) $((a[i+1]+1)) $((a[b[1]]))", "(list (cmd \"echo\" (w (arith (idx a 1))) (w (arith (+ (idx a (+ i 1)) 1))) (w (arith (idx a (idx b 1))))))" },
+        .{ "echo $(( (1+2)*3 ))", "(list (cmd \"echo\" (w (arith (* (+ 1 2) 3)))))" },
+        .{ "echo $(( $x + ${y} + $(z) ))", "(list (cmd \"echo\" (w (arith (+ (+ (exp (w (v x))) (exp (w (v y)))) (exp (w (cs (list (cmd \"z\"))))))))))" },
+        .{ "echo $(( x$i ))", "(list (cmd \"echo\" (w (arith (exp (w \"x\" (v i)))))))" },
+        .{ "echo $(( ))", "(list (cmd \"echo\" (w (arith 0))))" },
+        .{ "echo $(())", "(list (cmd \"echo\" (w (arith 0))))" },
+        .{ "echo $((1 +))", "(list (cmd \"echo\" (w (arith (invalid \"syntax error: operand expected (error token is \\\"\\\")\")))))" },
+        .{ "echo $((1 2))", "(list (cmd \"echo\" (w (arith (invalid \"syntax error in expression (error token is \\\"2\\\")\")))))" },
+        .{ "echo $((1 = 2))", "(list (cmd \"echo\" (w (arith (invalid \"attempted assignment to non-variable (error token is \\\"= 2\\\")\")))))" },
+        .{ "echo $[1+2]", "(list (cmd \"echo\" (w (arith (+ 1 2)))))" },
+        .{ "echo $((a)) $(( a ))", "(list (cmd \"echo\" (w (arith a)) (w (arith a))))" },
+        .{ "echo \"$((1+2))\"", "(list (cmd \"echo\" (w (dq (arith (+ 1 2))))))" },
+        .{ "x=$((1+2))", "(list (cmd (= x (w (arith (+ 1 2))))))" },
+        .{ "(( a ))", "(list (arith-cmd a))" },
+        .{ "((a))", "(list (arith-cmd a))" },
+        .{ "((a)) && b", "(list (&& (arith-cmd a) (cmd \"b\")))" },
+        .{ "(( ))", "(list (arith-cmd 0))" },
+        .{ "((echo a); b)", "(list (sub (list (sub (list (cmd \"echo\" \"a\"))) (cmd \"b\"))))" },
+        .{ "( (a) )", "(list (sub (list (sub (list (cmd \"a\"))))))" },
+        .{ "(( a )) ; (( b ))", "(list (arith-cmd a) (arith-cmd b))" },
+        .{ "echo $((echo a) | cat)", "(list (cmd \"echo\" (w (cs (list (pipe (sub (list (cmd \"echo\" \"a\"))) | (cmd \"cat\")))))))" },
+        .{ "echo $( (a) )", "(list (cmd \"echo\" (w (cs (list (sub (list (cmd \"a\"))))))))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "dump extglob and misc" {
+    const cases = [_][2][]const u8{
+        .{ "echo *(a)", "(list (cmd \"echo\" \"*(a)\"))" },
+        .{ "echo @(a|b) +(c) ?(d) !(e)", "(list (cmd \"echo\" \"@(a|b)\" \"+(c)\" \"?(d)\" \"!(e)\"))" },
+        .{ "echo *.txt ?x [a-z]*", "(list (cmd \"echo\" \"*.txt\" \"?x\" \"[a-z]*\"))" },
+        .{ "case x in @(a|b)) :;; esac", "(list (case \"x\" ((\"@(a|b)\") (list (cmd \":\")))))" },
+        .{ "coproc a", "(list (coproc (cmd \"a\")))" },
+        .{ "coproc NAME { a; }", "(list (coproc \"NAME\" (grp (list (cmd \"a\")))))" },
+        .{ "coproc { a; }", "(list (coproc (grp (list (cmd \"a\")))))" },
+        .{ "echo a || echo b &", "(list (& (|| (cmd \"echo\" \"a\") (cmd \"echo\" \"b\"))))" },
+        .{ "a && { b; c; }", "(list (&& (cmd \"a\") (grp (list (cmd \"b\") (cmd \"c\")))))" },
+        .{ "a || ( b )", "(list (|| (cmd \"a\") (sub (list (cmd \"b\")))))" },
+        .{ "a &&\nb", "(list (&& (cmd \"a\") (cmd \"b\")))" },
+        .{ "a ||\nb", "(list (|| (cmd \"a\") (cmd \"b\")))" },
+        .{ "a |\nb", "(list (pipe (cmd \"a\") | (cmd \"b\")))" },
+        .{ "a |&\nb", "(list (pipe (cmd \"a\") |& (cmd \"b\")))" },
+        .{ "a;\nb", "(list (cmd \"a\") (cmd \"b\"))" },
+        .{ "if a; then b; fi; if c; then d; fi", "(list (if (list (cmd \"a\")) (list (cmd \"b\"))) (if (list (cmd \"c\")) (list (cmd \"d\"))))" },
+        .{ "echo $x$y${z}\"$w\"'$v'", "(list (cmd \"echo\" (w (v x) (v y) (v z) (dq (v w)) (q \"$v\"))))" },
+        .{ "a=1; b=2; echo $a$b", "(list (cmd (= a \"1\")) (cmd (= b \"2\")) (cmd \"echo\" (w (v a) (v b))))" },
+        .{ "FOO=bar baz", "(list (cmd (= FOO \"bar\") \"baz\"))" },
+        .{ "FOO=bar BAR=baz cmd arg1 arg2 > out", "(list (cmd (= FOO \"bar\") (= BAR \"baz\") \"cmd\" \"arg1\" \"arg2\" (r > \"out\")))" },
+        .{ "echo a b   c", "(list (cmd \"echo\" \"a\" \"b\" \"c\"))" },
+        .{ "echo\ttab", "(list (cmd \"echo\" \"tab\"))" },
+        .{ "echo \"a\" \"b\"", "(list (cmd \"echo\" (w (dq \"a\")) (w (dq \"b\"))))" },
+        .{ "echo \"\"", "(list (cmd \"echo\" (w (dq))))" },
+        .{ "echo '' \"\" a''b\n", "(list (cmd \"echo\" (w (q \"\")) (w (dq)) (w \"a\" (q \"\") \"b\")))" },
+    };
+    for (cases) |c| try expect_dump(c[0], c[1]);
+}
+
+test "syntax error messages" {
+    const cases = [_][2][]const u8{
+        .{ "if then", "zash: -c: line 1: syntax error near unexpected token `then'\nzash: -c: line 1: `if then'\n" },
+        .{ "echo (", "zash: -c: line 1: syntax error near unexpected token `newline'\nzash: -c: line 1: `echo ('\n" },
+        .{ "echo )", "zash: -c: line 1: syntax error near unexpected token `)'\nzash: -c: line 1: `echo )'\n" },
+        .{ "if true; then", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo \"abc", "zash: -c: line 1: unexpected EOF while looking for matching `\"'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo 'abc", "zash: -c: line 1: unexpected EOF while looking for matching `''\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo $(", "zash: -c: line 1: unexpected EOF while looking for matching `)'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo `ls", "zash: -c: line 1: unexpected EOF while looking for matching ``'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "a ||", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "&& a", "zash: -c: line 1: syntax error near unexpected token `&&'\nzash: -c: line 1: `&& a'\n" },
+        .{ "a | | b", "zash: -c: line 1: syntax error near unexpected token `|'\nzash: -c: line 1: `a | | b'\n" },
+        .{ "case x in a) ;;", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "for i in 1; echo", "zash: -c: line 1: syntax error near unexpected token `echo'\nzash: -c: line 1: `for i in 1; echo'\n" },
+        .{ "fi", "zash: -c: line 1: syntax error near unexpected token `fi'\nzash: -c: line 1: `fi'\n" },
+        .{ "done", "zash: -c: line 1: syntax error near unexpected token `done'\nzash: -c: line 1: `done'\n" },
+        .{ "}", "zash: -c: line 1: syntax error near unexpected token `}'\nzash: -c: line 1: `}'\n" },
+        .{ ";;", "zash: -c: line 1: syntax error near unexpected token `;;'\nzash: -c: line 1: `;;'\n" },
+        .{ "echo a;; b", "zash: -c: line 1: syntax error near unexpected token `;;'\nzash: -c: line 1: `echo a;; b'\n" },
+        .{ "echo ${", "zash: -c: line 1: unexpected EOF while looking for matching `}'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo ${a", "zash: -c: line 1: unexpected EOF while looking for matching `}'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "f()", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "function", "zash: -c: line 1: syntax error near unexpected token `newline'\nzash: -c: line 1: `function'\n" },
+        .{ "while true; do", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "( echo", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "{ echo", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo >", "zash: -c: line 1: syntax error near unexpected token `newline'\nzash: -c: line 1: `echo >'\n" },
+        .{ "echo <", "zash: -c: line 1: syntax error near unexpected token `newline'\nzash: -c: line 1: `echo <'\n" },
+        .{ "echo a &&", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo $((1+", "zash: -c: line 1: unexpected EOF while looking for matching `)'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo ${a/b", "zash: -c: line 1: unexpected EOF while looking for matching `}'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "if; then a; fi", "zash: -c: line 1: syntax error near unexpected token `;'\nzash: -c: line 1: `if; then a; fi'\n" },
+        .{ "echo |", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "|", "zash: -c: line 1: syntax error near unexpected token `|'\nzash: -c: line 1: `|'\n" },
+        .{ "echo a b ) c", "zash: -c: line 1: syntax error near unexpected token `)'\nzash: -c: line 1: `echo a b ) c'\n" },
+        .{ "do", "zash: -c: line 1: syntax error near unexpected token `do'\nzash: -c: line 1: `do'\n" },
+        .{ "then a", "zash: -c: line 1: syntax error near unexpected token `then'\nzash: -c: line 1: `then a'\n" },
+        .{ "esac", "zash: -c: line 1: syntax error near unexpected token `esac'\nzash: -c: line 1: `esac'\n" },
+        .{ "case x in a) echo;; b echo ;; esac", "zash: -c: line 1: syntax error near unexpected token `echo'\nzash: -c: line 1: `case x in a) echo;; b echo ;; esac'\n" },
+        .{ "for in", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "f() { :; } ; f ()", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "x=1 ( a )", "zash: -c: line 1: syntax error near unexpected token `('\nzash: -c: line 1: `x=1 ( a )'\n" },
+        .{ "echo a <<<", "zash: -c: line 1: syntax error near unexpected token `newline'\nzash: -c: line 1: `echo a <<<'\n" },
+        .{ "[[ a == ]]", "zash: -c: line 1: unexpected argument `]]' to conditional binary operator\nzash: -c: line 1: syntax error near `]]'\nzash: -c: line 1: `[[ a == ]]'\n" },
+        .{ "[[ a", "zash: -c: line 1: unexpected token `newline', conditional binary operator expected\nzash: -c: line 1: syntax error near `a'\nzash: -c: line 1: `[[ a'\n" },
+        .{ "[[ a b ]]", "zash: -c: line 1: conditional binary operator expected\nzash: -c: line 1: syntax error near `b'\nzash: -c: line 1: `[[ a b ]]'\n" },
+        .{ "[[ -f ]]", "zash: -c: line 1: unexpected argument `]]' to conditional unary operator\nzash: -c: line 1: syntax error near `]]'\nzash: -c: line 1: `[[ -f ]]'\n" },
+        .{ "[[ ( a ]]", "zash: -c: line 1: unexpected token `]]', expected `)'\nzash: -c: line 1: syntax error near `]]'\nzash: -c: line 1: `[[ ( a ]]'\n" },
+        .{ "echo a\necho b\nfi", "zash: -c: line 3: syntax error near unexpected token `fi'\nzash: -c: line 3: `fi'\n" },
+        .{ "echo a\n\n  done", "zash: -c: line 3: syntax error near unexpected token `done'\nzash: -c: line 3: `  done'\n" },
+        .{ "if a; then b; done", "zash: -c: line 1: syntax error near unexpected token `done'\nzash: -c: line 1: `if a; then b; done'\n" },
+        .{ "while a; do b; fi", "zash: -c: line 1: syntax error near unexpected token `fi'\nzash: -c: line 1: `while a; do b; fi'\n" },
+        .{ "for i in a; do b; esac", "zash: -c: line 1: syntax error near unexpected token `esac'\nzash: -c: line 1: `for i in a; do b; esac'\n" },
+        .{ "case x in a) b; fi", "zash: -c: line 1: syntax error near unexpected token `fi'\nzash: -c: line 1: `case x in a) b; fi'\n" },
+        .{ "{ a; fi", "zash: -c: line 1: syntax error near unexpected token `fi'\nzash: -c: line 1: `{ a; fi'\n" },
+        .{ "( a; }", "zash: -c: line 1: syntax error near unexpected token `}'\nzash: -c: line 1: `( a; }'\n" },
+        .{ "{ a; )", "zash: -c: line 1: syntax error near unexpected token `)'\nzash: -c: line 1: `{ a; )'\n" },
+        .{ "if a; then b; else; fi", "zash: -c: line 1: syntax error near unexpected token `;'\nzash: -c: line 1: `if a; then b; else; fi'\n" },
+        .{ "if a; then b; elif; fi", "zash: -c: line 1: syntax error near unexpected token `;'\nzash: -c: line 1: `if a; then b; elif; fi'\n" },
+        .{ "if a; then b; elif c; fi", "zash: -c: line 1: syntax error near unexpected token `fi'\nzash: -c: line 1: `if a; then b; elif c; fi'\n" },
+        .{ "a & & b", "zash: -c: line 1: syntax error near unexpected token `&'\nzash: -c: line 1: `a & & b'\n" },
+        .{ "a ; ; b", "zash: -c: line 1: syntax error near unexpected token `;'\nzash: -c: line 1: `a ; ; b'\n" },
+        .{ "a && ; b", "zash: -c: line 1: syntax error near unexpected token `;'\nzash: -c: line 1: `a && ; b'\n" },
+        .{ "a ; && b", "zash: -c: line 1: syntax error near unexpected token `&&'\nzash: -c: line 1: `a ; && b'\n" },
+        .{ "case x in a)) b;; esac", "zash: -c: line 1: syntax error near unexpected token `)'\nzash: -c: line 1: `case x in a)) b;; esac'\n" },
+        .{ "case x in a|) b;; esac", "zash: -c: line 1: syntax error near unexpected token `)'\nzash: -c: line 1: `case x in a|) b;; esac'\n" },
+        .{ "case x in |a) b;; esac", "zash: -c: line 1: syntax error near unexpected token `|'\nzash: -c: line 1: `case x in |a) b;; esac'\n" },
+        .{ "for i in a b c do :; done", "zash: -c: line 1: syntax error near unexpected token `done'\nzash: -c: line 1: `for i in a b c do :; done'\n" },
+        .{ "select x in; done", "zash: -c: line 1: syntax error near unexpected token `done'\nzash: -c: line 1: `select x in; done'\n" },
+        .{ "echo > > f", "zash: -c: line 1: syntax error near unexpected token `>'\nzash: -c: line 1: `echo > > f'\n" },
+        .{ "echo >&", "zash: -c: line 1: syntax error near unexpected token `newline'\nzash: -c: line 1: `echo >&'\n" },
+        .{ "echo > ;", "zash: -c: line 1: syntax error near unexpected token `;'\nzash: -c: line 1: `echo > ;'\n" },
+        .{ "echo ((a))", "zash: -c: line 1: syntax error near unexpected token `('\nzash: -c: line 1: `echo ((a))'\n" },
+        .{ "echo a (b)", "zash: -c: line 1: syntax error near unexpected token `('\nzash: -c: line 1: `echo a (b)'\n" },
+        .{ "cmd 2>", "zash: -c: line 1: syntax error near unexpected token `newline'\nzash: -c: line 1: `cmd 2>'\n" },
+        .{ "cat <<", "zash: -c: line 1: syntax error near unexpected token `newline'\nzash: -c: line 1: `cat <<'\n" },
+        .{ "cat << ;", "zash: -c: line 1: syntax error near unexpected token `;'\nzash: -c: line 1: `cat << ;'\n" },
+        .{ "echo \"a\nb", "zash: -c: line 1: unexpected EOF while looking for matching `\"'\nzash: -c: line 3: syntax error: unexpected end of file\n" },
+        .{ "echo 'a\nb", "zash: -c: line 1: unexpected EOF while looking for matching `''\nzash: -c: line 3: syntax error: unexpected end of file\n" },
+        .{ "echo $(echo \"a)", "zash: -c: line 1: unexpected EOF while looking for matching `\"'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo ${a:-\"b}", "zash: -c: line 1: unexpected EOF while looking for matching `\"'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo \"${a\"", "zash: -c: line 1: unexpected EOF while looking for matching `}'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "if [ a ]; then\n  b\nelif", "zash: -c: line 4: syntax error: unexpected end of file\n" },
+        .{ "x=(a b", "zash: -c: line 1: unexpected EOF while looking for matching `)'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "x=(a b)) c", "zash: -c: line 1: syntax error near unexpected token `)'\nzash: -c: line 1: `x=(a b)) c'\n" },
+        .{ "echo $(( 1 + (2 )", "zash: -c: line 1: syntax error near unexpected token `('\nzash: -c: line 1: `echo $(( 1 + (2 )'\n" },
+        .{ "function f() ", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "function f", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "function f {", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "f() {", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "f() (", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "f() ( a", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "[[ a == b ]] ]]", "zash: -c: line 1: syntax error near unexpected token `]]'\nzash: -c: line 1: `[[ a == b ]] ]]'\n" },
+        .{ "[[ a && ]]", "zash: -c: line 1: syntax error near `]]'\nzash: -c: line 1: `[[ a && ]]'\n" },
+        .{ "[[ || a ]]", "zash: -c: line 1: unexpected token `||' in conditional command\nzash: -c: line 1: syntax error near `|'\nzash: -c: line 1: `[[ || a ]]'\n" },
+        .{ "[[ a == b c ]]", "zash: -c: line 1: syntax error in conditional expression\nzash: -c: line 1: syntax error near `c'\nzash: -c: line 1: `[[ a == b c ]]'\n" },
+        .{ "[[ ! ]]", "zash: -c: line 1: syntax error near `]]'\nzash: -c: line 1: `[[ ! ]]'\n" },
+        .{ "[[ a ) ]]", "zash: -c: line 1: syntax error in conditional expression: unexpected token `)'\nzash: -c: line 1: syntax error near `)'\nzash: -c: line 1: `[[ a ) ]]'\n" },
+        .{ "time ( ", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo a |& ", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "coproc", "zash: -c: line 1: syntax error near unexpected token `newline'\nzash: -c: line 1: `coproc'\n" },
+        .{ "a;;", "zash: -c: line 1: syntax error near unexpected token `;;'\nzash: -c: line 1: `a;;'\n" },
+        .{ "case x in a) echo a esac", "zash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "echo { a; }", "zash: -c: line 1: syntax error near unexpected token `}'\nzash: -c: line 1: `echo { a; }'\n" },
+        .{ "[[ a ) ]]", "zash: -c: line 1: syntax error in conditional expression: unexpected token `)'\nzash: -c: line 1: syntax error near `)'\nzash: -c: line 1: `[[ a ) ]]'\n" },
+        .{ "[[ || a ]]", "zash: -c: line 1: unexpected token `||' in conditional command\nzash: -c: line 1: syntax error near `|'\nzash: -c: line 1: `[[ || a ]]'\n" },
+        .{ "echo a\n  fi\necho b", "zash: -c: line 2: syntax error near unexpected token `fi'\nzash: -c: line 2: `  fi'\n" },
+        .{ "if a; then b; elif; fi", "zash: -c: line 1: syntax error near unexpected token `;'\nzash: -c: line 1: `if a; then b; elif; fi'\n" },
+        .{ "a=(1 | 2)", "zash: -c: line 1: syntax error near unexpected token `|'\nzash: -c: line 1: `a=(1 | 2)'\n" },
+        .{ "for ((i=0;i<3)); do :; done", "zash: -c: line 1: syntax error near unexpected token `('\nzash: -c: line 1: `for ((i=0;i<3)); do :; done'\n" },
+        .{ "f() { echo; } )", "zash: -c: line 1: syntax error near unexpected token `)'\nzash: -c: line 1: `f() { echo; } )'\n" },
+    };
+    for (cases) |c| try expect_error(c[0], c[1]);
+}
+
+fn parse_ok(arena: Allocator, src: []const u8) !ast.List {
+    switch (parse(arena, src, .{})) {
+        .ok => |l| return l,
+        .err => return error.TestUnexpectedResult,
+    }
+}
+
+fn parse_err(arena: Allocator, src: []const u8) !ParseError {
+    switch (parse(arena, src, .{})) {
+        .ok => return error.TestUnexpectedResult,
+        .err => |e| return e,
+    }
+}
+
+test "line numbers on items and commands" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const l = try parse_ok(arena.allocator(), "a\n\nb\nif c; then\n  d\nfi\n");
+    try std.testing.expectEqual(@as(usize, 3), l.items.len);
+    try std.testing.expectEqual(@as(u32, 1), l.items[0].line);
+    try std.testing.expectEqual(@as(u32, 3), l.items[1].line);
+    try std.testing.expectEqual(@as(u32, 4), l.items[2].line);
+    const cmd = l.items[2].and_or.first.commands[0];
+    try std.testing.expectEqual(@as(u32, 4), cmd.line);
+    const inner = cmd.body.if_cmd.clauses[0].body.items[0];
+    try std.testing.expectEqual(@as(u32, 5), inner.line);
+}
+
+test "word line numbers span multiline quotes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const l = try parse_ok(arena.allocator(), "echo \"a\nb\" c\necho d");
+    const words = l.items[0].and_or.first.commands[0].body.simple.words;
+    try std.testing.expectEqual(@as(u32, 1), words[1].line);
+    try std.testing.expectEqual(@as(u32, 2), words[2].line);
+    try std.testing.expectEqual(@as(u32, 3), l.items[1].line);
+}
+
+test "error fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const e = try parse_err(arena.allocator(), "echo a\n  fi\necho b");
+    try std.testing.expectEqual(ParseError.Kind.unexpected_token, e.kind);
+    try std.testing.expectEqual(@as(u32, 2), e.line);
+    try std.testing.expectEqual(@as(u32, 3), e.col);
+    try std.testing.expectEqualStrings("fi", e.text);
+    try std.testing.expectEqualStrings("  fi", e.src_line);
+    const e2 = try parse_err(arena.allocator(), "if true; then\n");
+    try std.testing.expectEqual(ParseError.Kind.unexpected_eof, e2.kind);
+    try std.testing.expectEqual(@as(u32, 2), e2.eof_line);
+    const e3 = try parse_err(arena.allocator(), "echo \"abc\n\n");
+    try std.testing.expectEqual(ParseError.Kind.eof_matching, e3.kind);
+    try std.testing.expectEqual(@as(u32, 1), e3.line);
+    try std.testing.expectEqual(@as(u32, 3), e3.eof_line);
+}
+
+test "pipeline flags" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const l = try parse_ok(arena.allocator(), "! time -p a |& b | c");
+    const p = l.items[0].and_or.first;
+    try std.testing.expect(p.negate);
+    try std.testing.expectEqual(ast.TimeMode.time_posix, p.time);
+    try std.testing.expectEqual(@as(usize, 3), p.commands.len);
+    try std.testing.expectEqual(@as(usize, 2), p.pipe_stderr.len);
+    try std.testing.expect(p.pipe_stderr[0]);
+    try std.testing.expect(!p.pipe_stderr[1]);
+}
+
+test "assignment structure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const l = try parse_ok(arena.allocator(), "a+=1 b[2]=x c=(p [3]=q) cmd");
+    const s = l.items[0].and_or.first.commands[0].body.simple;
+    try std.testing.expectEqual(@as(usize, 3), s.assigns.len);
+    try std.testing.expect(s.assigns[0].append);
+    try std.testing.expectEqualStrings("a", s.assigns[0].name);
+    try std.testing.expect(s.assigns[1].index != null);
+    try std.testing.expectEqual(@as(usize, 2), s.assigns[2].value.array.len);
+    try std.testing.expect(s.assigns[2].value.array[1].key != null);
+    try std.testing.expectEqual(@as(usize, 1), s.words.len);
+}
+
+test "heredoc structure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const l = try parse_ok(arena.allocator(), "cat <<-'END'\n\t$x\n\tEND\n");
+    const r = l.items[0].and_or.first.commands[0].redirs[0];
+    try std.testing.expectEqual(ast.RedirOp.heredoc_strip, r.op);
+    const h = r.heredoc.?;
+    try std.testing.expectEqualStrings("END", h.delimiter);
+    try std.testing.expect(h.quoted);
+    try std.testing.expect(h.strip_tabs);
+    try std.testing.expectEqualStrings("$x\n", h.body.parts[0].quoted);
+}
+
+test "heredoc inside substitution accepts closing paren after delimiter" {
+    try expect_dump("x=$(cat <<EOF\na\nEOF)\necho b", "(list (cmd (= x (w (cs (list (cmd \"cat\" (r << \"EOF\" u (w \"a\\n\")))))))) (cmd \"echo\" \"b\"))");
+}
+
+test "substitution syntax errors are deferred" {
+    try expect_dump("echo $(a;}) `a >` <(fi)", "(list (cmd \"echo\" (w (bad \"$(a;})\")) (w (bad \"`a >`\")) (w (bad \"<(fi)\"))))");
+}
+
+test "unterminated substitution is fatal" {
+    try expect_error("echo $(a;", "zash: -c: line 1: unexpected EOF while looking for matching `)'\nzash: -c: line 2: syntax error: unexpected end of file\n");
+}
+
+test "extglob can be disabled" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    switch (parse(arena.allocator(), "echo *(a)", .{ .extglob = false })) {
+        .ok => return error.TestUnexpectedResult,
+        .err => |e| try std.testing.expectEqualStrings("(", e.text),
+    }
+    _ = try parse_ok(arena.allocator(), "echo *(a)");
+}
+
+test "parse_arith_text for runtime reparse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const e = try parse_arith_text(arena.allocator(), " 1+2*x ");
+    var aw: std.Io.Writer.Allocating = .init(arena.allocator());
+    try dump.dump_arith(&aw.writer, e);
+    try std.testing.expectEqualStrings("(+ 1 (* 2 x))", aw.written());
+    const bad = try parse_arith_text(arena.allocator(), "1 +");
+    try std.testing.expect(bad.* == .invalid);
+}
+
+test "arith value parsing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const e = try parse_arith_text(arena.allocator(), "0x7fffffffffffffff + 18446744073709551615 + 36#zz + 64#_");
+    try std.testing.expect(e.* == .binary);
+    const l = try parse_arith_text(arena.allocator(), "18446744073709551615");
+    try std.testing.expectEqual(@as(i64, -1), l.num);
+}
+
+test "deep nesting is rejected without crashing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const n = 5000;
+    const open = try a.alloc(u8, n * 2);
+    for (0..n) |i| @memcpy(open[i * 2 ..][0..2], "{ ");
+    try std.testing.expectEqual(ParseError.Kind.nesting, (try parse_err(a, open)).kind);
+    const subs = try a.alloc(u8, n * 2);
+    for (0..n) |i| @memcpy(subs[i * 2 ..][0..2], "$(");
+    try std.testing.expectEqual(ParseError.Kind.nesting, (try parse_err(a, subs)).kind);
+    const parens = try a.alloc(u8, n);
+    @memset(parens, '(');
+    try std.testing.expectEqual(ParseError.Kind.nesting, (try parse_err(a, parens)).kind);
+}
+
+test "long pipelines and lists parse iteratively" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: std.ArrayList(u8) = .empty;
+    for (0..20000) |_| try buf.appendSlice(a, "a | ");
+    try buf.appendSlice(a, "b && c || d; ");
+    for (0..20000) |_| try buf.appendSlice(a, "x && ");
+    try buf.appendSlice(a, "y");
+    const l = try parse_ok(a, buf.items);
+    try std.testing.expectEqual(@as(usize, 2), l.items.len);
+    try std.testing.expectEqual(@as(usize, 20001), l.items[0].and_or.first.commands.len);
+    try std.testing.expectEqual(@as(usize, 20000), l.items[1].and_or.rest.len);
+}
+
+test "loops accept brace bodies" {
+    try expect_dump("for i in a b; { echo $i; }", "(list (for \"i\" (in \"a\" \"b\") (list (cmd \"echo\" (w (v i))))))");
+    try expect_dump("for ((;;)) { :; }", "(list (for-arith _ _ _ (list (cmd \":\"))))");
+    try expect_dump("select x in a; { :; }", "(list (select \"x\" (in \"a\") (list (cmd \":\"))))");
+}
+
+test "arithmetic for header errors" {
+    try expect_error("for ((i=0;i<3)); do :; done", "zash: -c: line 1: syntax error: arithmetic expression required\nzash: -c: line 1: syntax error: `((i=0;i<3))'\n");
+    try expect_error("for ((i=0;i<3;i++;)); do :; done", "zash: -c: line 1: syntax error: `;' unexpected\nzash: -c: line 1: syntax error: `((i=0;i<3;i++;))'\n");
 }
 
 const fuzz_seeds = [_][]const u8{
