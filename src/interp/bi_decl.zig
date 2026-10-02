@@ -112,16 +112,18 @@ pub fn value_text(sh: *Shell, v: *Var, out: *std.ArrayList(u8)) Err!void {
         },
         .assoc => |*m| {
             try out.appendSlice(a, "=(");
-            var it = m.map.iterator();
-            while (it.next()) |e| {
+            const ord = try m.ordered(sh.gpa);
+            const ks = m.map.keys();
+            const vs = m.map.values();
+            for (ord) |idx| {
                 try out.append(a, '[');
-                if (key_needs_quote(e.key_ptr.*)) {
+                if (key_needs_quote(ks[idx])) {
                     try out.append(a, '"');
-                    try escape_dq(a, out, e.key_ptr.*);
+                    try escape_dq(a, out, ks[idx]);
                     try out.append(a, '"');
-                } else try out.appendSlice(a, e.key_ptr.*);
+                } else try out.appendSlice(a, ks[idx]);
                 try out.appendSlice(a, "]=\"");
-                try escape_dq(a, out, e.value_ptr.*);
+                try escape_dq(a, out, vs[idx]);
                 try out.appendSlice(a, "\" ");
             }
             try out.append(a, ')');
@@ -137,7 +139,8 @@ pub fn print_declare(sh: *Shell, v: *Var, out: *std.ArrayList(u8)) Err!void {
     if (attrs.len == 0) try out.append(a, '-') else try out.appendSlice(a, attrs);
     try out.append(a, ' ');
     try out.appendSlice(a, v.name);
-    if (v.special != .none and v.value == .none) {
+    if (!v.array_set and ((v.value == .indexed and v.value.indexed.items.items.len == 0) or (v.value == .assoc and v.value.assoc.map.count() == 0))) {
+    } else if (v.special != .none and v.value == .none) {
         if (sh.scalar_of(v)) |s| {
             try out.appendSlice(a, "=\"");
             try escape_dq(a, out, s);
@@ -284,7 +287,7 @@ pub fn run(sh: *Shell, kind: Kind, items: []const exec.DeclItem) Err!u8 {
                 .arg => |s| s,
                 .assign => |as| as.name,
             };
-            const v = sh.find(nm) orelse {
+            const v = sh.vars.get(nm) orelse sh.find(nm) orelse {
                 sh.bmsg(name, "{s}: not found", .{nm});
                 status = 1;
                 continue;

@@ -607,8 +607,9 @@ fn array_values(sh: *Shell, v: *shell.Var) Err![]const []const u8 {
         .str => |s| try l.append(sh.sa, s),
         .indexed => |*ix| for (ix.items.items) |e| try l.append(sh.sa, e.val),
         .assoc => |*m| {
-            var it = m.map.iterator();
-            while (it.next()) |e| try l.append(sh.sa, e.value_ptr.*);
+            const ord = try m.ordered(sh.gpa);
+            const vals = m.map.values();
+            for (ord) |i| try l.append(sh.sa, vals[i]);
         },
     }
     return l.items;
@@ -621,8 +622,9 @@ fn array_keys(sh: *Shell, v: *shell.Var) Err![]const []const u8 {
         .str => try l.append(sh.sa, "0"),
         .indexed => |*ix| for (ix.items.items) |e| try l.append(sh.sa, try sh.tmp_fmt("{d}", .{e.idx})),
         .assoc => |*m| {
-            var it = m.map.iterator();
-            while (it.next()) |e| try l.append(sh.sa, e.key_ptr.*);
+            const ord = try m.ordered(sh.gpa);
+            const ks = m.map.keys();
+            for (ord) |i| try l.append(sh.sa, ks[i]);
         },
     }
     return l.items;

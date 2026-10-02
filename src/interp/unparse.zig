@@ -503,6 +503,7 @@ pub const Pretty = struct {
     fn sep(self: *Pretty) Err!void {
         if (self.heredocs.items.len > 0) {
             try self.flush_heredocs();
+            try self.put("\n");
             try self.pad();
             return;
         }

@@ -73,10 +73,49 @@ pub const Indexed = struct {
     }
 };
 
+pub fn bash_hash(s: []const u8) u32 {
+    var h: u32 = 2166136261;
+    for (s) |c| {
+        h *%= 16777619;
+        h ^= c;
+    }
+    return h;
+}
+
 pub const Assoc = struct {
     map: std.StringArrayHashMapUnmanaged([]u8) = .empty,
+    order: ?[]u32 = null,
+
+    fn invalidate(self: *Assoc, a: Allocator) void {
+        if (self.order) |o| a.free(o);
+        self.order = null;
+    }
+
+    const SortCtx = struct {
+        keys: []const []const u8,
+        nb: u32,
+        fn less(self: SortCtx, x: u32, y: u32) bool {
+            const bx = bash_hash(self.keys[x]) & (self.nb - 1);
+            const by = bash_hash(self.keys[y]) & (self.nb - 1);
+            if (bx != by) return bx < by;
+            return x > y;
+        }
+    };
+
+    pub fn ordered(self: *Assoc, a: Allocator) Allocator.Error![]const u32 {
+        if (self.order) |o| return o;
+        const n = self.map.count();
+        const o = try a.alloc(u32, n);
+        for (o, 0..) |*e, i| e.* = @intCast(i);
+        var nb: u32 = 1024;
+        while (n >= nb * 2) nb *= 2;
+        std.mem.sort(u32, o, SortCtx{ .keys = self.map.keys(), .nb = nb }, SortCtx.less);
+        self.order = o;
+        return o;
+    }
 
     pub fn deinit(self: *Assoc, a: Allocator) void {
+        self.invalidate(a);
         var it = self.map.iterator();
         while (it.next()) |e| {
             a.free(e.key_ptr.*);
@@ -100,18 +139,21 @@ pub const Assoc = struct {
         const k = try a.dupe(u8, key);
         errdefer a.free(k);
         try self.map.put(a, k, copy);
+        self.invalidate(a);
     }
 
     pub fn remove(self: *Assoc, a: Allocator, key: []const u8) bool {
         if (self.map.fetchOrderedRemove(key)) |kv| {
             a.free(kv.key);
             a.free(kv.value);
+            self.invalidate(a);
             return true;
         }
         return false;
     }
 
     pub fn clear(self: *Assoc, a: Allocator) void {
+        self.invalidate(a);
         var it = self.map.iterator();
         while (it.next()) |e| {
             a.free(e.key_ptr.*);
@@ -155,6 +197,7 @@ pub const Var = struct {
     special: Special = .none,
     depth: u32 = 0,
     declared_array: u2 = 0,
+    array_set: bool = false,
 
     pub fn is_array(self: *const Var) bool {
         return self.value == .indexed or self.value == .assoc;

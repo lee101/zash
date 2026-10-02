@@ -628,6 +628,7 @@ pub const Shell = struct {
 
     pub fn assign_assoc(self: *Shell, v: *Var, key: []const u8, value: []const u8, append: bool) Err!void {
         var val = value;
+        v.array_set = true;
         const cur = v.value.assoc.get(key);
         if (v.flags.integer) {
             if (append) {
@@ -647,6 +648,7 @@ pub const Shell = struct {
 
     pub fn assign_indexed(self: *Shell, v: *Var, idx_in: i64, value: []const u8, append: bool) Err!void {
         var idx = idx_in;
+        v.array_set = true;
         switch (v.value) {
             .none => v.value = .{ .indexed = .{} },
             .str => |s| {

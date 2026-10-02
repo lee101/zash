@@ -1036,6 +1036,7 @@ pub fn do_assign(sh: *Shell, a: ast.Assign) Err!void {
 pub fn assign_array(sh: *Shell, name: []const u8, elems: []const ast.ArrayElem, append: bool) Err!void {
     const v = sh.find(name) orelse try sh.new_var(name);
     if (v.flags.readonly) return sh.readonly_err(v.name);
+    v.array_set = true;
     const is_assoc = v.value == .assoc;
     const Pair = struct { key: ?[]const u8, idx: ?i64, val: []const u8 };
     var pairs: std.ArrayList(Pair) = .empty;

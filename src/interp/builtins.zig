@@ -1627,7 +1627,9 @@ fn bi_wait(sh: *Shell, argv: []const []const u8) Err!u8 {
                 j.done = true;
                 j.status = sys.status_code(st);
                 if (j.disowned) continue;
-                return j.status;
+                const code = j.status;
+                j.disowned = true;
+                return code;
             }
         }
     }
@@ -1638,6 +1640,7 @@ fn bi_wait(sh: *Shell, argv: []const []const u8) Err!u8 {
             j.reaped = true;
             j.done = true;
         }
+        for (sh.jobs.items) |*j| j.disowned = true;
         return 0;
     }
     var status: u8 = 0;
@@ -1673,6 +1676,7 @@ fn bi_wait(sh: *Shell, argv: []const []const u8) Err!u8 {
                 j.done = true;
                 status = j.status;
             }
+            j.disowned = true;
         } else {
             sh.bmsg("wait", "pid {d} is not a child of this shell", .{pid});
             status = 127;
