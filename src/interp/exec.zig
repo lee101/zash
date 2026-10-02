@@ -518,6 +518,7 @@ pub fn run_command(sh: *Shell, c: *const ast.Command, final: bool) Err!u8 {
     defer scope.restore(sh);
     if (!try redir.apply(sh, c.redirs, &scope)) {
         sh.status = 1;
+        try errexit_check(sh, 1);
         return 1;
     }
     return run_body(sh, c, final);
@@ -1436,6 +1437,12 @@ pub fn dispatch_ex(sh: *Shell, argv: []const []const u8, decl: []const DeclItem,
         }
     }
     if (builtins.lookup(name)) |b| {
+        if (argv.len > 1 and std.mem.eql(u8, argv[1], "--help")) {
+            if (builtins.help_line(name)) |hl| {
+                _ = sh.outf("{s}: {s}\n", .{ name, hl });
+                return 0;
+            }
+        }
         var scope: redir.Scope = .{};
         const is_exec = std.mem.eql(u8, name, "exec");
         defer if (!is_exec) scope.restore(sh);
@@ -1999,6 +2006,9 @@ fn run_debug_trap(sh: *Shell, c: *const ast.Command) Err!void {
 }
 
 pub fn run_trap_text(sh: *Shell, text: []const u8, line_base: u32) Err!void {
+    const saved_entry = sh.trap_entry_status;
+    sh.trap_entry_status = sh.status;
+    defer sh.trap_entry_status = saved_entry;
     const saved_file = sh.cur_file;
     const saved_line = sh.lineno;
     defer {

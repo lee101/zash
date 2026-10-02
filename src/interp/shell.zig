@@ -244,6 +244,7 @@ pub const Shell = struct {
     cwd_logical: []u8 = &.{},
     alias_depth: u32 = 0,
     abort_errexit: bool = false,
+    trap_entry_status: ?u8 = null,
     alias_horizon: u32 = std.math.maxInt(u32),
     abort_eof: bool = false,
     exec_final_cmd: ?*const ast.Command = null,

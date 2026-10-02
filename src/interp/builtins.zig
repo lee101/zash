@@ -115,6 +115,64 @@ const table = std.StaticStringMap(Builtin).initComptime(.{
     .{ "suspend", Builtin{ .run = bi_true } },
 });
 
+const help_lines = std.StaticStringMap([]const u8).initComptime(.{
+    .{ ".", ". filename [arguments]" },
+    .{ "alias", "alias [-p] [name[=value] ... ]" },
+    .{ "bg", "bg [job_spec ...]" },
+    .{ "break", "break [n]" },
+    .{ "builtin", "builtin [shell-builtin [arg ...]]" },
+    .{ "caller", "caller [expr]" },
+    .{ "cd", "cd [-L|[-P [-e]] [-@]] [dir]" },
+    .{ "command", "command [-pVv] command [arg ...]" },
+    .{ "compgen", "compgen [-abcdefgjksuv] [-o option] [-A action] [-G globpat] [-W wordlist]  [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [word]" },
+    .{ "continue", "continue [n]" },
+    .{ "declare", "declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]" },
+    .{ "dirs", "dirs [-clpv] [+N] [-N]" },
+    .{ "disown", "disown [-h] [-ar] [jobspec ... | pid ...]" },
+    .{ "enable", "enable [-a] [-dnps] [-f filename] [name ...]" },
+    .{ "eval", "eval [arg ...]" },
+    .{ "exec", "exec [-cl] [-a name] [command [argument ...]] [redirection ...]" },
+    .{ "exit", "exit [n]" },
+    .{ "export", "export [-fn] [name[=value] ...] or export -p" },
+    .{ "fg", "fg [job_spec]" },
+    .{ "getopts", "getopts optstring name [arg ...]" },
+    .{ "hash", "hash [-lr] [-p pathname] [-dt] [name ...]" },
+    .{ "help", "help [-dms] [pattern ...]" },
+    .{ "history", "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]" },
+    .{ "jobs", "jobs [-lnprs] [jobspec ...] or jobs -x command [args]" },
+    .{ "kill", "kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]" },
+    .{ "let", "let arg [arg ...]" },
+    .{ "local", "local [option] name[=value] ..." },
+    .{ "logout", "logout [n]" },
+    .{ "mapfile", "mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]" },
+    .{ "popd", "popd [-n] [+N | -N]" },
+    .{ "printf", "printf [-v var] format [arguments]" },
+    .{ "pushd", "pushd [-n] [+N | -N | dir]" },
+    .{ "pwd", "pwd [-LP]" },
+    .{ "read", "read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]" },
+    .{ "readarray", "readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]" },
+    .{ "readonly", "readonly [-aAf] [name[=value] ...] or readonly -p" },
+    .{ "return", "return [n]" },
+    .{ "set", "set [-abefhkmnptuvxBCHP] [-o option-name] [--] [arg ...]" },
+    .{ "shift", "shift [n]" },
+    .{ "shopt", "shopt [-pqsu] [-o] [optname ...]" },
+    .{ "source", "source filename [arguments]" },
+    .{ "suspend", "suspend [-f]" },
+    .{ "times", "times" },
+    .{ "trap", "trap [-lp] [[arg] signal_spec ...]" },
+    .{ "type", "type [-afptP] name [name ...]" },
+    .{ "typeset", "typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]" },
+    .{ "ulimit", "ulimit [-SHabcdefiklmnpqrstuvxPT] [limit]" },
+    .{ "umask", "umask [-p] [-S] [mode]" },
+    .{ "unalias", "unalias [-a] name [name ...]" },
+    .{ "unset", "unset [-f] [-v] [-n] [name ...]" },
+    .{ "wait", "wait [-fn] [-p var] [id ...]" },
+});
+
+pub fn help_line(name: []const u8) ?[]const u8 {
+    return help_lines.get(name);
+}
+
 pub fn lookup(name: []const u8) ?Builtin {
     if (sh_disabled_check(name)) return null;
     return table.get(name);
@@ -403,7 +461,7 @@ fn parse_status_arg(sh: *Shell, name: []const u8, s: []const u8) ?i64 {
 }
 
 fn bi_exit(sh: *Shell, argv: []const []const u8) Err!u8 {
-    var code: u8 = sh.status;
+    var code: u8 = sh.trap_entry_status orelse sh.status;
     if (argv.len > 1) {
         if (parse_status_arg(sh, "exit", argv[1])) |v| {
             if (argv.len > 2) {
@@ -904,7 +962,7 @@ fn bi_exec(sh: *Shell, argv: []const []const u8) Err!u8 {
             i += 1;
             if (i < argv.len) argv0 = argv[i];
         } else {
-            sh.bmsg("exec", "{s}: invalid option", .{a});
+            sh.bmsg("exec", "-{c}: invalid option", .{a[1]});
             sh.usage_msg("exec", "exec [-cl] [-a name] [command [argument ...]] [redirection ...]");
             return 2;
         }
@@ -941,7 +999,7 @@ fn bi_exec(sh: *Shell, argv: []const []const u8) Err!u8 {
         },
         .not_found => {
             if (std.mem.findScalar(u8, name, '/') != null) {
-                sh.bmsg("exec", "{s}: No such file or directory", .{name});
+                sh.msg("{s}: No such file or directory", .{name});
             } else sh.bmsg("exec", "{s}: not found", .{name});
             if (!sh.shopt(.execfail) and !sh.interactive) {
                 sh.exit_status_pending = 127;
@@ -951,7 +1009,7 @@ fn bi_exec(sh: *Shell, argv: []const []const u8) Err!u8 {
             return 127;
         },
         .denied => |p| {
-            sh.bmsg("exec", "{s}: Permission denied", .{p});
+            sh.msg("{s}: Permission denied", .{p});
             if (!sh.shopt(.execfail) and !sh.interactive) {
                 sh.exit_status_pending = 126;
                 sh.status = 126;
@@ -960,7 +1018,7 @@ fn bi_exec(sh: *Shell, argv: []const []const u8) Err!u8 {
             return 126;
         },
         .is_dir => |p| {
-            sh.bmsg("exec", "{s}: Is a directory", .{p});
+            sh.msg("{s}: Is a directory", .{p});
             if (!sh.shopt(.execfail) and !sh.interactive) {
                 sh.exit_status_pending = 126;
                 sh.status = 126;
@@ -1160,6 +1218,18 @@ fn bi_type(sh: *Shell, argv: []const []const u8) Err!u8 {
         if (std.mem.eql(u8, a, "--")) {
             i += 1;
             break;
+        }
+        if (std.mem.eql(u8, a, "-type")) {
+            mode = .type_t;
+            continue;
+        }
+        if (std.mem.eql(u8, a, "-path")) {
+            path_only = true;
+            continue;
+        }
+        if (std.mem.eql(u8, a, "-all")) {
+            all = true;
+            continue;
         }
         for (a[1..]) |c| {
             switch (c) {
