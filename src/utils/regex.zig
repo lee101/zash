@@ -799,6 +799,7 @@ pub const Regex = struct {
     first_bytes: ByteSet,
     can_be_empty: bool,
     must: ?[]const u8,
+    must_icase: bool,
     literal_only: ?[]const u8,
     fwd: Dfa,
     anc: Dfa,
@@ -859,6 +860,7 @@ pub const Regex = struct {
         self.computeClasses();
         try self.computeFirst();
         self.must = null;
+        self.must_icase = false;
         self.literal_only = null;
         self.analyzeLiterals(ast);
         self.fwd = try Dfa.init(alloc, self, true);
@@ -947,28 +949,56 @@ pub const Regex = struct {
 
     fn analyzeLiterals(self: *Regex, ast: *const Node) void {
         const arena = self.arena.allocator();
-        if (self.opts.icase) return;
+        const icase = self.opts.icase;
         var lit: std.ArrayList(u8) = .empty;
-        if (pureLiteral(ast, &lit, arena)) {
-            if (lit.items.len > 0) self.literal_only = lit.items;
+        if (pureLiteral(ast, &lit, arena, icase)) {
+            if (lit.items.len > 0) {
+                self.literal_only = lit.items;
+                self.must_icase = icase;
+            }
             return;
         }
         var best: []const u8 = "";
         var cur: std.ArrayList(u8) = .empty;
-        findMust(ast, &cur, &best, arena);
+        findMust(ast, &cur, &best, arena, icase);
         flushMust(&cur, &best);
-        if (best.len >= 2) self.must = best;
+        if (best.len >= 2) {
+            self.must = best;
+            self.must_icase = icase;
+        }
     }
 
-    fn pureLiteral(n: *const Node, out: *std.ArrayList(u8), arena: Allocator) bool {
+    fn litByte(s: ByteSet, icase: bool) ?u8 {
+        if (s.single()) |b| {
+            if (icase and std.ascii.isAlphabetic(b)) return null;
+            return b;
+        }
+        if (icase and s.count() == 2) {
+            var lo: ?u8 = null;
+            var c: usize = 'a';
+            while (c <= 'z') : (c += 1) {
+                const l: u8 = @intCast(c);
+                if (s.has(l) and s.has(l - 32)) lo = l;
+            }
+            if (lo) |l| {
+                var t: ByteSet = .{};
+                t.add(l);
+                t.add(l - 32);
+                if (t.eql(s)) return l;
+            }
+        }
+        return null;
+    }
+
+    fn pureLiteral(n: *const Node, out: *std.ArrayList(u8), arena: Allocator, icase: bool) bool {
         switch (n.*) {
             .set => |s| {
-                const b = s.single() orelse return false;
+                const b = litByte(s, icase) orelse return false;
                 out.append(arena, b) catch return false;
                 return true;
             },
             .cat => |items| {
-                for (items) |it| if (!pureLiteral(it, out, arena)) return false;
+                for (items) |it| if (!pureLiteral(it, out, arena, icase)) return false;
                 return true;
             },
             else => return false,
@@ -980,20 +1010,20 @@ pub const Regex = struct {
         cur.* = .empty;
     }
 
-    fn findMust(n: *const Node, cur: *std.ArrayList(u8), best: *[]const u8, arena: Allocator) void {
+    fn findMust(n: *const Node, cur: *std.ArrayList(u8), best: *[]const u8, arena: Allocator, icase: bool) void {
         switch (n.*) {
             .set => |s| {
-                if (s.single()) |b| {
+                if (litByte(s, icase)) |b| {
                     cur.append(arena, b) catch {};
                 } else flushMust(cur, best);
             },
-            .cat => |items| for (items) |it| findMust(it, cur, best, arena),
-            .group => |g| findMust(g.sub, cur, best, arena),
+            .cat => |items| for (items) |it| findMust(it, cur, best, arena, icase),
+            .group => |g| findMust(g.sub, cur, best, arena, icase),
             .assert => {},
             .repeat => |r| {
                 flushMust(cur, best);
                 if (r.min >= 1) {
-                    findMust(r.sub, cur, best, arena);
+                    findMust(r.sub, cur, best, arena, icase);
                     flushMust(cur, best);
                 }
             },
@@ -1001,18 +1031,23 @@ pub const Regex = struct {
         }
     }
 
+    fn findLit(self: *const Regex, hay: []const u8, needle: []const u8, from: usize) ?usize {
+        if (self.must_icase) return common.findBytesIcase(hay, needle, from);
+        return common.findBytes(hay, needle, from);
+    }
+
     pub fn isMatch(self: *Regex, hay: []const u8) bool {
-        if (self.literal_only) |l| return common.findBytes(hay, l, 0) != null;
-        if (self.must) |m| if (common.findBytes(hay, m, 0) == null) return false;
+        if (self.literal_only) |l| return self.findLit(hay, l, 0) != null;
+        if (self.must) |m| if (self.findLit(hay, m, 0) == null) return false;
         return self.fwd.search(hay, 0) != null;
     }
 
     pub fn searchBuffer(self: *Regex, buf: []const u8, from: usize) ?usize {
-        if (self.literal_only) |l| return common.findBytes(buf, l, from);
+        if (self.literal_only) |l| return self.findLit(buf, l, from);
         if (self.must) |m| {
             var pos = from;
             while (true) {
-                const q = common.findBytes(buf, m, pos) orelse return null;
+                const q = self.findLit(buf, m, pos) orelse return null;
                 const ls = if (common.findLastByte(buf[pos..q], '\n')) |i| pos + i + 1 else pos;
                 const le = std.mem.findScalarPos(u8, buf, q, '\n') orelse buf.len;
                 if (self.fwd.search(buf[ls..le], 0)) |p| return ls + p;
@@ -1049,6 +1084,10 @@ const Dfa = struct {
     re: *Regex,
     unanchored: bool,
     stride: u32,
+    shift: u5,
+    gen: u32 = 0,
+    accel: std.ArrayList(u8) = .empty,
+    accel_bytes: std.ArrayList([3]u8) = .empty,
     trans: std.ArrayList(u32) = .empty,
     keys: std.ArrayList([]u32) = .empty,
     map: std.StringHashMapUnmanaged(u32) = .empty,
@@ -1070,7 +1109,8 @@ const Dfa = struct {
             .alloc = alloc,
             .re = re,
             .unanchored = unanchored,
-            .stride = @intCast(re.nclasses),
+            .stride = std.math.ceilPowerOfTwoAssert(u32, @intCast(re.nclasses)),
+            .shift = @intCast(std.math.log2_int_ceil(u32, @intCast(re.nclasses))),
             .mark = try alloc.alloc(u32, re.nfa.states.items.len),
         };
         errdefer alloc.free(d.mark);
@@ -1085,6 +1125,8 @@ const Dfa = struct {
         self.trans.deinit(self.alloc);
         self.map.deinit(self.alloc);
         self.eof.deinit(self.alloc);
+        self.accel.deinit(self.alloc);
+        self.accel_bytes.deinit(self.alloc);
         self.stack.deinit(self.alloc);
         self.tmp.deinit(self.alloc);
         self.resolved.deinit(self.alloc);
@@ -1097,6 +1139,9 @@ const Dfa = struct {
         self.trans.clearRetainingCapacity();
         self.map.clearRetainingCapacity();
         self.eof.clearRetainingCapacity();
+        self.accel.clearRetainingCapacity();
+        self.accel_bytes.clearRetainingCapacity();
+        self.gen +%= 1;
         self.start_set = .{ false, false, false, false };
         _ = try self.addState(&.{}, 0);
         for (self.trans.items[0..self.stride]) |*t| t.* = flag_dead;
@@ -1118,15 +1163,56 @@ const Dfa = struct {
         try self.map.put(self.alloc, std.mem.sliceAsBytes(self.keys.items[id]), id);
         try self.trans.appendNTimes(self.alloc, flag_unknown, self.stride);
         try self.eof.append(self.alloc, 0);
+        try self.accel.append(self.alloc, 0);
+        try self.accel_bytes.append(self.alloc, .{ 0, 0, 0 });
         return id;
     }
 
     fn offset(self: *const Dfa, id: u32) u32 {
-        return id * self.stride;
+        return id << self.shift;
     }
 
     fn sidOf(self: *const Dfa, off: u32) u32 {
-        return off / self.stride;
+        return off >> self.shift;
+    }
+
+    fn computeAccel(self: *Dfa, sid: u32) void {
+        const re = self.re;
+        if (self.keys.items.len + re.nclasses + 8 >= max_states) {
+            self.accel.items[sid] = 1;
+            return;
+        }
+        const gen0 = self.gen;
+        var bytes: [3]u8 = undefined;
+        var nb: usize = 0;
+        const self_v = self.offset(sid) << 2;
+        for (0..re.nclasses) |col| {
+            var v = self.trans.items[self.offset(sid) + col];
+            if (v == flag_unknown) {
+                v = self.compute(sid, col) catch {
+                    self.accel.items[sid] = 1;
+                    return;
+                };
+                if (self.gen != gen0) return;
+            }
+            if (v == self_v) continue;
+            for (0..256) |b| {
+                if (re.classmap[b] == col) {
+                    if (nb >= 3) {
+                        self.accel.items[sid] = 1;
+                        return;
+                    }
+                    bytes[nb] = @intCast(b);
+                    nb += 1;
+                }
+            }
+        }
+        if (nb == 0) {
+            self.accel.items[sid] = 1;
+            return;
+        }
+        self.accel_bytes.items[sid] = .{ bytes[0], if (nb > 1) bytes[1] else 0, if (nb > 2) bytes[2] else 0 };
+        self.accel.items[sid] = @intCast(nb + 1);
     }
 
     fn nextGen(self: *Dfa) void {
@@ -1281,23 +1367,35 @@ const Dfa = struct {
         const cm = &re.classmap;
         const n = hay.len;
         while (i < n) {
+            const ac = self.accel.items[self.sidOf(off)];
+            if (ac >= 2) {
+                const ab = self.accel_bytes.items[self.sidOf(off)];
+                i = common.findAnyOf(hay, i, ab[0 .. ac - 1]);
+                if (i >= n) break;
+            }
             const t = self.trans.items.ptr;
-            while (i < n) {
+            const start_off = off;
+            const lim = @min(n, i + 32);
+            while (i < lim) {
                 const v = t[off + cm[hay[i]]];
                 if (v & 3 != 0) break;
                 off = v >> 2;
                 i += 1;
             }
             if (i >= n) break;
-            var v = self.trans.items[off + cm[hay[i]]];
-            if (v == flag_unknown) v = self.compute(self.sidOf(off), cm[hay[i]]) catch return null;
-            switch (v & 3) {
-                flag_match => return i,
-                flag_dead => return null,
-                else => {
-                    off = v >> 2;
-                    i += 1;
-                },
+            if (i < lim) {
+                var v = self.trans.items[off + cm[hay[i]]];
+                if (v == flag_unknown) v = self.compute(self.sidOf(off), cm[hay[i]]) catch return null;
+                switch (v & 3) {
+                    flag_match => return i,
+                    flag_dead => return null,
+                    else => {
+                        off = v >> 2;
+                        i += 1;
+                    },
+                }
+            } else if (off == start_off and ac == 0) {
+                self.computeAccel(self.sidOf(off));
             }
         }
         const fin = self.sidOf(off);

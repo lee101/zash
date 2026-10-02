@@ -326,8 +326,9 @@ fn runImpl(ctx: *Ctx, argv: []const []const u8, io: Stdio) common.IoError!u8 {
         var ctr: Counter = .{ .flags = flags, .utf8 = utf8 };
         defer ctr.scratch.deinit(ctx.alloc);
         var done = false;
-        if (!in.stdin and flags.bytes and flags.count() == 1 and in.src.kind == .file and in.src.size > 0) {
+        if (!in.stdin and (flags.bytes or (flags.chars and !utf8)) and flags.count() == 1 and in.src.kind == .file and in.src.size > 0) {
             ctr.c.bytes = in.src.size;
+            ctr.c.chars = in.src.size;
             done = true;
         }
         if (!done) {

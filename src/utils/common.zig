@@ -1023,6 +1023,90 @@ pub fn findBytes(hay: []const u8, needle: []const u8, from: usize) ?usize {
     return null;
 }
 
+pub fn findAnyOf(hay: []const u8, from: usize, bytes: []const u8) usize {
+    const L = 32;
+    const V = @Vector(L, u8);
+    var i = from;
+    switch (bytes.len) {
+        1 => return std.mem.findScalarPos(u8, hay, i, bytes[0]) orelse hay.len,
+        2 => {
+            const a: V = @splat(bytes[0]);
+            const b: V = @splat(bytes[1]);
+            while (i + L <= hay.len) : (i += L) {
+                const v: V = hay[i..][0..L].*;
+                const m: u32 = @bitCast((v == a) | (v == b));
+                if (m != 0) return i + @ctz(m);
+            }
+        },
+        3 => {
+            const a: V = @splat(bytes[0]);
+            const b: V = @splat(bytes[1]);
+            const c: V = @splat(bytes[2]);
+            while (i + L <= hay.len) : (i += L) {
+                const v: V = hay[i..][0..L].*;
+                const m: u32 = @bitCast((v == a) | (v == b) | (v == c));
+                if (m != 0) return i + @ctz(m);
+            }
+        },
+        else => {},
+    }
+    while (i < hay.len) : (i += 1) {
+        for (bytes) |c| if (hay[i] == c) return i;
+    }
+    return hay.len;
+}
+
+fn lowerAscii(c: u8) u8 {
+    return if (c >= 'A' and c <= 'Z') c + 32 else c;
+}
+
+pub fn findBytesIcase(hay: []const u8, needle: []const u8, from: usize) ?usize {
+    if (needle.len == 0) return if (from <= hay.len) from else null;
+    if (hay.len < needle.len or from > hay.len - needle.len) return null;
+    var r1: usize = 0;
+    for (needle, 0..) |c, i| {
+        if (byte_rank[c] < byte_rank[needle[r1]]) r1 = i;
+    }
+    var r2: usize = if (r1 == 0) needle.len - 1 else 0;
+    if (needle.len == 1) r2 = r1;
+    for (needle, 0..) |c, i| {
+        if (i != r1 and byte_rank[c] < byte_rank[needle[r2]]) r2 = i;
+    }
+    const L = 32;
+    const V = @Vector(L, u8);
+    const f1 = std.ascii.isAlphabetic(needle[r1]);
+    const f2 = std.ascii.isAlphabetic(needle[r2]);
+    const b1: V = @splat(needle[r1]);
+    const b2: V = @splat(needle[r2]);
+    const bit: V = @splat(0x20);
+    const last_start = hay.len - needle.len;
+    const maxr = @max(r1, r2);
+    var i = from;
+    while (i + L + maxr <= hay.len) {
+        var v1: V = hay[i + r1 ..][0..L].*;
+        var v2: V = hay[i + r2 ..][0..L].*;
+        if (f1) v1 |= bit;
+        if (f2) v2 |= bit;
+        var mask: u32 = @bitCast((v1 == b1) & (v2 == b2));
+        while (mask != 0) {
+            const k = @ctz(mask);
+            mask &= mask - 1;
+            const pos = i + k;
+            if (pos <= last_start and eqlIcase(hay[pos..][0..needle.len], needle)) return pos;
+        }
+        i += L;
+    }
+    while (i <= last_start) : (i += 1) {
+        if (eqlIcase(hay[i..][0..needle.len], needle)) return i;
+    }
+    return null;
+}
+
+fn eqlIcase(a: []const u8, lower_needle: []const u8) bool {
+    for (a, lower_needle) |x, y| if (lowerAscii(x) != y) return false;
+    return true;
+}
+
 pub fn isDashOperand(s: []const u8) bool {
     return s.len == 1 and s[0] == '-';
 }

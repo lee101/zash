@@ -316,63 +316,112 @@ pub fn supportsEnv(env: *const common.EnvView, argv: []const []const u8) bool {
 
 const Block = struct { data: []u8, abs_off: u64, has_nul: bool, final: bool };
 
+const page = 4096;
+
 const BlockReader = struct {
     r: *Io.Reader,
+    file: ?Io.File = null,
+    io: Io = undefined,
+    file_off: u64 = 0,
     alloc: std.mem.Allocator,
-    buf: std.ArrayList(u8) = .empty,
+    raw: []align(page) u8 = &.{},
+    pad: usize = 0,
+    ds: usize = 0,
+    de: usize = 0,
     abs_base: u64 = 0,
     pending_drop: usize = 0,
     eof: bool = false,
     read_err: bool = false,
 
     fn deinit(self: *BlockReader) void {
-        self.buf.deinit(self.alloc);
+        if (self.raw.len > 0) self.alloc.free(self.raw);
+    }
+
+    fn grow(self: *BlockReader, need_pad: usize, need_tail: usize) !void {
+        const new_pad = std.mem.alignForward(usize, @max(need_pad, 1), page);
+        const dlen = self.de - self.ds;
+        const new_len = @max(new_pad + need_tail, new_pad + win_size);
+        const nb = try self.alloc.alignedAlloc(u8, .fromByteUnits(page), new_len);
+        const nds = new_pad - @min(new_pad, self.pad - self.ds);
+        _ = nds;
+        const carry_before_pad = if (self.pad > self.ds) self.pad - self.ds else 0;
+        const start = new_pad - carry_before_pad;
+        @memcpy(nb[start .. start + dlen], self.raw[self.ds..self.de]);
+        if (self.raw.len > 0) self.alloc.free(self.raw);
+        self.raw = nb;
+        self.pad = new_pad;
+        self.ds = start;
+        self.de = start + dlen;
     }
 
     fn next(self: *BlockReader) !?Block {
+        if (self.raw.len == 0) try self.grow(0, win_size);
         if (self.pending_drop > 0) {
-            const rest = self.buf.items.len - self.pending_drop;
-            @memmove(self.buf.items[0..rest], self.buf.items[self.pending_drop..]);
-            self.buf.shrinkRetainingCapacity(rest);
+            const carry_len = (self.de - self.ds) - self.pending_drop;
+            const src_start = self.ds + self.pending_drop;
             self.abs_base += self.pending_drop;
             self.pending_drop = 0;
+            if (carry_len > self.pad) {
+                self.ds = src_start;
+                try self.grow(carry_len, win_size);
+            } else {
+                @memmove(self.raw[self.pad - carry_len .. self.pad], self.raw[src_start..self.de]);
+                self.ds = self.pad - carry_len;
+                self.de = self.pad;
+            }
         }
         var has_nul = false;
         while (true) {
-            if (self.eof and self.buf.items.len == 0) return null;
-            const loaded_end = self.abs_base + self.buf.items.len;
+            if (self.eof and self.de == self.ds) return null;
+            const loaded_end = self.abs_base + (self.de - self.ds);
             const target = (loaded_end / win_size + 1) * win_size;
-            const scan_from = self.buf.items.len;
-            while (!self.eof and self.abs_base + self.buf.items.len < target) {
-                if (self.r.bufferedLen() == 0) {
-                    self.r.fillMore() catch |e| switch (e) {
-                        error.EndOfStream => {
-                            self.eof = true;
-                            break;
-                        },
-                        error.ReadFailed => {
-                            self.read_err = true;
-                            self.eof = true;
-                            break;
-                        },
+            const scan_from = self.de;
+            while (!self.eof and self.abs_base + (self.de - self.ds) < target) {
+                const want: usize = @intCast(target - (self.abs_base + (self.de - self.ds)));
+                if (self.de + want > self.raw.len) try self.grow(self.pad, (self.de - self.pad) + want);
+                if (self.file) |f| {
+                    const n = f.readPositional(self.io, &.{self.raw[self.de..][0..want]}, self.file_off) catch {
+                        self.read_err = true;
+                        self.eof = true;
+                        break;
                     };
+                    if (n == 0) {
+                        self.eof = true;
+                        break;
+                    }
+                    self.de += n;
+                    self.file_off += n;
+                } else {
+                    if (self.r.bufferedLen() == 0) {
+                        self.r.fillMore() catch |e| switch (e) {
+                            error.EndOfStream => {
+                                self.eof = true;
+                                break;
+                            },
+                            error.ReadFailed => {
+                                self.read_err = true;
+                                self.eof = true;
+                                break;
+                            },
+                        };
+                    }
+                    const b = self.r.buffered();
+                    const take = @min(b.len, want);
+                    @memcpy(self.raw[self.de..][0..take], b[0..take]);
+                    self.de += take;
+                    self.r.toss(take);
                 }
-                const b = self.r.buffered();
-                const want: usize = @intCast(target - (self.abs_base + self.buf.items.len));
-                const take = @min(b.len, want);
-                try self.buf.appendSlice(self.alloc, b[0..take]);
-                self.r.toss(take);
             }
-            if (std.mem.findScalar(u8, self.buf.items[scan_from..], 0) != null) has_nul = true;
-            const data = self.buf.items;
+            if (std.mem.findScalar(u8, self.raw[scan_from..self.de], 0) != null) has_nul = true;
+            const data = self.raw[self.ds..self.de];
             if (self.eof) {
                 if (data.len == 0) return null;
                 self.pending_drop = data.len;
-                return .{ .data = self.buf.items, .abs_off = self.abs_base, .has_nul = has_nul, .final = true };
+                return .{ .data = data, .abs_off = self.abs_base, .has_nul = has_nul, .final = true };
             }
             if (common.findLastByte(data, '\n')) |i| {
                 self.pending_drop = i + 1;
-                return .{ .data = self.buf.items[0 .. i + 1], .abs_off = self.abs_base, .has_nul = has_nul, .final = false };
+                return .{ .data = data[0 .. i + 1], .abs_off = self.abs_base, .has_nul = has_nul, .final = false };
             }
         }
     }
@@ -724,6 +773,10 @@ const Searcher = struct {
             };
             data = tmp.?;
         }
+        if (self.out_quiet and !self.ctx_enabled and !self.cfg.word and !self.max_reached and (!self.cfg.invert or (!self.done_on_match and self.cfg.max_count == null))) {
+            try self.processQuiet(data);
+            return;
+        }
         self.cursor_pos = 0;
         self.cursor_line = line0;
         self.block_line0 = line0;
@@ -749,6 +802,33 @@ const Searcher = struct {
                 return;
             }
         }
+    }
+
+    fn processQuiet(self: *Searcher, data: []const u8) !void {
+        const re = self.re;
+        var matched: u64 = 0;
+        var pos: usize = 0;
+        if (re) |r| {
+            while (pos < data.len) {
+                const q = r.searchBuffer(data, pos) orelse break;
+                if (q >= data.len) break;
+                const le = std.mem.findScalarPos(u8, data, q, '\n') orelse data.len;
+                matched += 1;
+                pos = if (le < data.len) le + 1 else data.len;
+                if (!self.cfg.invert) {
+                    if (self.done_on_match) break;
+                    if (self.cfg.max_count) |m| if (self.count + matched >= m) break;
+                }
+            }
+        }
+        if (!self.cfg.invert) {
+            self.count += matched;
+            if (matched > 0 and (self.done_on_match or (self.cfg.max_count != null and self.count >= self.cfg.max_count.?))) self.stop = true;
+            return;
+        }
+        var total = common.countByte(data, '\n');
+        if (data.len > 0 and data[data.len - 1] != '\n') total += 1;
+        self.count += total - matched;
     }
 
     fn onSelected(self: *Searcher, data: []const u8, s: Line, abs: u64) !void {
@@ -1093,7 +1173,10 @@ const Walker = struct {
         if (max != null and max.? == 0) skip_file = true;
         var read_failed = false;
         if (!skip_file) {
-            var br: BlockReader = .{ .r = r, .alloc = self.ctx.alloc };
+            var br: BlockReader = .{ .r = r, .alloc = self.ctx.alloc, .io = self.ctx.io };
+            if (in) |i| {
+                if (!i.stdin and i.src.kind == .file) br.file = i.src.file;
+            }
             defer br.deinit();
             var line_base: u64 = 1;
             while (try br.next()) |blk| {
