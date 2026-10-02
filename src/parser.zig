@@ -372,7 +372,10 @@ pub const Parser = struct {
             .and_dgreat => .append_err,
             else => return self.unexpected(),
         };
+        self.lex.no_io_number = true;
+        defer self.lex.no_io_number = false;
         try self.advance(false);
+        self.lex.no_io_number = false;
         if (self.tok.tag == .eof) return self.lex.fail_newline();
         if (self.tok.tag != .word) return self.unexpected();
         var r = ast.Redirect{ .fd = fd, .op = op, .target = self.cur_word() };
@@ -1544,6 +1547,11 @@ test "loops accept brace bodies" {
 test "arithmetic for header errors" {
     try expect_error("for ((i=0;i<3)); do :; done", "zash: -c: line 1: syntax error: arithmetic expression required\nzash: -c: line 1: syntax error: `((i=0;i<3))'\n");
     try expect_error("for ((i=0;i<3;i++;)); do :; done", "zash: -c: line 1: syntax error: `;' unexpected\nzash: -c: line 1: syntax error: `((i=0;i<3;i++;))'\n");
+}
+
+test "redirect target is not an io number" {
+    try expect_dump("echo a 2>&1>f", "(list (cmd \"echo\" \"a\" (r 2 >& \"1\") (r > \"f\")))");
+    try expect_dump("cmd >&2 1>x <&0 3<y", "(list (cmd \"cmd\" (r >& \"2\") (r 1 > \"x\") (r <& \"0\") (r 3 < \"y\")))");
 }
 
 const fuzz_seeds = [_][]const u8{

@@ -178,6 +178,7 @@ pub const Lexer = struct {
     extglob: bool = true,
     depth: u32 = 0,
     no_heredoc: bool = false,
+    no_io_number: bool = false,
     subst_depth: u32 = 0,
 
     pub fn init(arena: Allocator, src: []const u8, opts: Options) Lexer {
@@ -388,7 +389,7 @@ pub const Lexer = struct {
                     else => self.tok_at(.great, 1),
                 };
             },
-            '0'...'9' => {
+            '0'...'9' => if (!self.no_io_number) {
                 var j = self.pos;
                 while (j < src.len and is_digit(src[j])) j += 1;
                 if (j < src.len and (src[j] == '<' or src[j] == '>') and !(j + 1 < src.len and src[j + 1] == '(')) {
