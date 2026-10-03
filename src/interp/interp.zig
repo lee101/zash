@@ -5,6 +5,7 @@ const sys = @import("sys.zig");
 const shell = @import("shell.zig");
 const vars_mod = @import("vars.zig");
 const exec = @import("exec.zig");
+const builtin = @import("builtin");
 
 pub const Shell = shell.Shell;
 pub const Err = shell.Err;
@@ -81,9 +82,9 @@ pub fn setup(sh: *Shell, environ: []const ?[*:0]const u8, script_name: []const u
     sh.cur_file = sh.script_name;
     try set_plain(sh, "IFS", " \t\n");
     if (sh.vars.get("PATH") == null) try set_plain(sh, "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-    try set_plain(sh, "PS1", "\\s-\\v\\$ ");
-    try set_plain(sh, "PS2", "> ");
-    try set_plain(sh, "PS4", "+ ");
+    if (sh.vars.get("PS1") == null) try set_plain(sh, "PS1", "\\s-\\v\\$ ");
+    if (sh.vars.get("PS2") == null) try set_plain(sh, "PS2", "> ");
+    if (sh.vars.get("PS4") == null) try set_plain(sh, "PS4", "+ ");
     try set_plain(sh, "OPTIND", "1");
     sh.getopts_expect = 1;
     const shl = try std.fmt.allocPrint(sh.sa, "{d}", .{shlvl + 1});
@@ -228,4 +229,138 @@ pub fn finish(sh: *Shell, status: u8) u8 {
         if (sh.exit_status_pending) |x| st = x;
     }
     return st;
+}
+
+fn expand_prompt(sh: *Shell, ps: []const u8) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const a = sh.sa;
+    var k: usize = 0;
+    while (k < ps.len) : (k += 1) {
+        const c = ps[k];
+        if (c != '\\' or k + 1 >= ps.len) {
+            out.append(a, c) catch return ps;
+            continue;
+        }
+        k += 1;
+        switch (ps[k]) {
+            'u' => out.appendSlice(a, sh.get_or_empty("USER")) catch {},
+            'h', 'H' => out.appendSlice(a, sh.get_or_empty("HOSTNAME")) catch {},
+            'w' => {
+                const pwd = sh.get_or_empty("PWD");
+                const home = sh.get_or_empty("HOME");
+                if (home.len > 0 and std.mem.startsWith(u8, pwd, home)) {
+                    out.append(a, '~') catch {};
+                    out.appendSlice(a, pwd[home.len..]) catch {};
+                } else out.appendSlice(a, pwd) catch {};
+            },
+            'W' => {
+                const pwd = sh.get_or_empty("PWD");
+                const base = if (std.mem.findScalarLast(u8, pwd, '/')) |s| pwd[s + 1 ..] else pwd;
+                out.appendSlice(a, if (base.len == 0) "/" else base) catch {};
+            },
+            '$' => out.append(a, if (sys.geteuid() == 0) '#' else '$') catch {},
+            'n' => out.append(a, '\n') catch {},
+            'r' => out.append(a, '\r') catch {},
+            'e' => out.append(a, 27) catch {},
+            's' => out.appendSlice(a, "zash") catch {},
+            'v' => out.appendSlice(a, "0.0") catch {},
+            'V' => out.appendSlice(a, "0.0.1") catch {},
+            '[', ']' => {},
+            '\\' => out.append(a, '\\') catch {},
+            else => {
+                out.append(a, '\\') catch {};
+                out.append(a, ps[k]) catch {};
+            },
+        }
+    }
+    return out.items;
+}
+
+pub fn run_interactive(sh: *Shell) u8 {
+    sh.interactive = true;
+    var act: sys.SigAction = .{ .handler = @intFromPtr(&shell.signal_handler) };
+    _ = sys.sigemptyset(&act.mask);
+    _ = sys.sigaction(sys.SIGINT, &act, null);
+    sys.set_signal(3, sys.SIG_IGN);
+    sys.set_signal(15, sys.SIG_IGN);
+    var pending: std.ArrayList(u8) = .empty;
+    var status: u8 = 0;
+    const gpa = sh.gpa;
+    defer pending.deinit(gpa);
+    while (true) {
+        const m = sh.scratch.mark();
+        const ps_name: []const u8 = if (pending.items.len == 0) "PS1" else "PS2";
+        const prompt = expand_prompt(sh, sh.get_scalar(ps_name) orelse (if (pending.items.len == 0) "$ " else "> "));
+        _ = sys.write_all(2, prompt);
+        var line: std.ArrayList(u8) = .empty;
+        var eof = false;
+        var interrupted = false;
+        while (true) {
+            var b: [1]u8 = undefined;
+            const n = sys.read(0, &b, 1);
+            if (n < 0) {
+                if (sys.errno() == sys.EINTR) {
+                    interrupted = true;
+                    break;
+                }
+                eof = true;
+                break;
+            }
+            if (n == 0) {
+                eof = true;
+                break;
+            }
+            line.append(sh.sa, b[0]) catch {};
+            if (b[0] == '\n') break;
+        }
+        if (interrupted) {
+            _ = shell.pending_signals.swap(0, .seq_cst);
+            _ = sys.write_all(2, "\n");
+            pending.clearRetainingCapacity();
+            sh.scratch.release(m);
+            continue;
+        }
+        if (eof and line.items.len == 0 and pending.items.len == 0) {
+            sh.scratch.release(m);
+            _ = sys.write_all(2, "exit\n");
+            break;
+        }
+        pending.appendSlice(gpa, line.items) catch break;
+        sh.scratch.release(m);
+        const holder = gpa.create(std.heap.ArenaAllocator) catch break;
+        holder.* = std.heap.ArenaAllocator.init(gpa);
+        const keep = holder.allocator().dupe(u8, pending.items) catch break;
+        var p = parser.Parser.init(holder.allocator(), keep, .{});
+        if (p.parse_script()) |list| {
+            sh.keep_arenas.append(gpa, holder) catch {};
+            if (exec.run_top(sh, list, keep)) |st| {
+                status = st;
+            } else |e| switch (e) {
+                error.Exit => return finish(sh, sh.exit_status_pending orelse sh.status),
+                else => status = sh.status,
+            }
+            sh.status = status;
+            pending.clearRetainingCapacity();
+        } else |e| {
+            const err_opt = p.lex.err;
+            holder.deinit();
+            gpa.destroy(holder);
+            switch (e) {
+                error.OutOfMemory => break,
+                error.Syntax => {
+                    const err = err_opt.?;
+                    const incomplete = err.kind == .unexpected_eof or err.kind == .eof_matching or err.kind == .eof_looking;
+                    if (incomplete and !eof) continue;
+                    var aw = std.Io.Writer.Allocating.init(sh.sa);
+                    err.write(&aw.writer, "zash") catch {};
+                    _ = sys.write_all(2, aw.written());
+                    sh.status = 2;
+                    status = 2;
+                    pending.clearRetainingCapacity();
+                },
+            }
+        }
+        if (eof) break;
+    }
+    return finish(sh, status);
 }

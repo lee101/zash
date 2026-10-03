@@ -6,6 +6,7 @@ pub const Shell = shell.Shell;
 pub const setup = @import("interp.zig").setup;
 pub const run_script = @import("interp.zig").run_script;
 pub const finish = @import("interp.zig").finish;
+pub const run_interactive = @import("interp.zig").run_interactive;
 
 test {
     _ = @import("bump.zig");

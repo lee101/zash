@@ -112,7 +112,9 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         };
     } else {
         read_stdin = true;
-        source = read_all_fd(arena, 0) catch return 1;
+        if (interactive or sys.isatty(0) == 1) {
+            interactive = true;
+        } else source = read_all_fd(arena, 0) catch return 1;
     }
 
     interp.setup(sh, env_ptrs, script_name) catch return 1;
@@ -162,6 +164,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         }
     }
 
+    if (interactive and command == null and script == null) return interp.run_interactive(sh);
     const prefix: []const u8 = if (command != null) (std.fmt.allocPrint(arena, "{s}: -c", .{script_name}) catch script_name) else script_name;
     const status = interp.run_script(sh, source, prefix);
     return status;
