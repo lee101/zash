@@ -24,7 +24,7 @@ pub fn render(sh: *Shell, node: *const ast.Arith, out: *std.ArrayList(u8)) Err!v
             try out.appendSlice(a, v.name);
             if (v.raw_index.len > 0) try out.print(a, "[{s}]", .{v.raw_index});
         },
-        .expansion => try out.appendSlice(a, "?"),
+        .expansion => |w| try out.appendSlice(a, try expand.word_string(sh, w)),
         .unary => |u| {
             try out.appendSlice(a, switch (u.op) {
                 .neg => "-",

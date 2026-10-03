@@ -843,7 +843,24 @@ fn expand_operand(b: *B, w: ast.Word, quoted: bool) Err!void {
     const save = b.split_lit;
     if (!quoted and b.mode == .fields) b.split_lit = true;
     defer b.split_lit = save;
-    try parts(b, w.parts, quoted);
+    var ps = w.parts;
+    if (!quoted and ps.len > 0) {
+        switch (ps[0]) {
+            .lit => |t| if (t.len > 0 and t[0] == '~') {
+                const end = std.mem.findScalar(u8, t, '/') orelse t.len;
+                if (try tilde(b.sh, t[1..end])) |r| {
+                    try b.add_quoted(r);
+                    const rest = t[end..];
+                    if (rest.len > 0) {
+                        if (b.split_lit) try b.add_split(rest) else try b.add_raw(rest);
+                    }
+                    ps = ps[1..];
+                }
+            },
+            else => {},
+        }
+    }
+    try parts(b, ps, quoted);
 }
 
 fn operand_string(sh: *Shell, w: ast.Word, quoted: bool) Err![]const u8 {

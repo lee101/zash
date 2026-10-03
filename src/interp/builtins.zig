@@ -513,6 +513,7 @@ fn loop_ctl(sh: *Shell, argv: []const []const u8, is_break: bool) Err!u8 {
         sh.bmsg(name, "only meaningful in a `for', `while', or `until' loop", .{});
         return 0;
     }
+    sh.status = 0;
     sh.ctl_n = @intCast(@min(n, @as(i64, sh.loop_depth)));
     return if (is_break) error.Break else error.Continue;
 }
@@ -981,6 +982,13 @@ fn bi_exec(sh: *Shell, argv: []const []const u8) Err!u8 {
             exec.child_prepare_exec(sh);
             if (sh.trap_exit.kind == .cmd) {
                 sh.trap_exit = .{};
+            }
+            if (sh.vars.get("SHLVL")) |sv| {
+                if (sv.flags.exported and sv.value == .str) {
+                    const lvl = std.fmt.parseInt(i64, sv.value.str, 10) catch 1;
+                    const nv = try sh.tmp_fmt("{d}", .{@max(lvl - 1, 0)});
+                    try sh.assign_scalar("SHLVL", nv, false);
+                }
             }
             if (clear_env) {
                 const empty = [_]?[*:0]const u8{null};

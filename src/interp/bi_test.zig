@@ -144,6 +144,43 @@ fn parse_primary(t: *T) Err!bool {
     return tok.len > 0;
 }
 
+fn eval_args(t: *T, args: []const []const u8) Err!bool {
+    const sh = t.sh;
+    const name = t.name;
+    const n = args.len;
+    switch (n) {
+        0 => return false,
+        1 => return args[0].len > 0,
+        2 => {
+            if (std.mem.eql(u8, args[0], "!")) return args[1].len == 0;
+            if (is_unary(args[0])) return unary(t, args[0], args[1]);
+            sh.bmsg(name, "{s}: unary operator expected", .{args[0]});
+            t.failed = true;
+            return false;
+        },
+        3 => {
+            if (is_binary(args[1])) return binary(t, args[0], args[1], args[2]);
+            if (std.mem.eql(u8, args[0], "!")) return !(try eval_args(t, args[1..]));
+            if (std.mem.eql(u8, args[0], "(") and std.mem.eql(u8, args[2], ")")) return args[1].len > 0;
+            if (std.mem.eql(u8, args[1], "-a")) return args[0].len > 0 and args[2].len > 0;
+            if (std.mem.eql(u8, args[1], "-o")) return args[0].len > 0 or args[2].len > 0;
+            sh.bmsg(name, "{s}: binary operator expected", .{args[1]});
+            t.failed = true;
+            return false;
+        },
+        4 => {
+            if (std.mem.eql(u8, args[0], "!")) return !(try eval_args(t, args[1..]));
+            if (std.mem.eql(u8, args[0], "(") and std.mem.eql(u8, args[3], ")")) return eval_args(t, args[1..3]);
+        },
+        else => {},
+    }
+    t.args = args;
+    t.pos = 0;
+    const r = try parse_or(t);
+    if (!t.failed and t.pos < args.len) t.fail("too many arguments", .{});
+    return r;
+}
+
 pub fn run(sh: *Shell, argv: []const []const u8) Err!u8 {
     const is_br = std.mem.eql(u8, argv[0], "[");
     var args = argv[1..];
@@ -156,48 +193,7 @@ pub fn run(sh: *Shell, argv: []const []const u8) Err!u8 {
         args = args[0 .. args.len - 1];
         t.args = args;
     }
-    const n = args.len;
-    var result: bool = false;
-    switch (n) {
-        0 => return 1,
-        1 => return if (args[0].len > 0) 0 else 1,
-        2 => {
-            if (std.mem.eql(u8, args[0], "!")) return if (args[1].len == 0) 0 else 1;
-            if (is_unary(args[0])) {
-                result = try unary(&t, args[0], args[1]);
-            } else {
-                sh.bmsg(argv[0], "{s}: unary operator expected", .{args[0]});
-                return 2;
-            }
-        },
-        3 => {
-            if (is_binary(args[1])) {
-                result = binary(&t, args[0], args[1], args[2]);
-            } else if (std.mem.eql(u8, args[0], "!")) {
-                if (is_unary(args[1])) {
-                    result = !(try unary(&t, args[1], args[2]));
-                } else {
-                    sh.bmsg(argv[0], "{s}: unary operator expected", .{args[1]});
-                    return 2;
-                }
-            } else if (std.mem.eql(u8, args[0], "(") and std.mem.eql(u8, args[2], ")")) {
-                result = args[1].len > 0;
-            } else if (std.mem.eql(u8, args[1], "-a")) {
-                result = args[0].len > 0 and args[2].len > 0;
-            } else if (std.mem.eql(u8, args[1], "-o")) {
-                result = args[0].len > 0 or args[2].len > 0;
-            } else {
-                sh.bmsg(argv[0], "{s}: binary operator expected", .{args[1]});
-                return 2;
-            }
-        },
-        else => {
-            result = try parse_or(&t);
-            if (!t.failed and t.pos < args.len) {
-                if (n > 4 or true) t.fail("too many arguments", .{});
-            }
-        },
-    }
+    const result = try eval_args(&t, args);
     if (t.failed) return 2;
     return if (result) 0 else 1;
 }
