@@ -1929,6 +1929,9 @@ fn run_util(sh: *Shell, argv: []const []const u8, redirs: []const ast.Redirect) 
     const env: common.EnvView = .{ .context = &ectx, .get_fn = EnvCtx.get };
     const cwd = sh.get_scalar("PWD") orelse ".";
     var ctx: common.Ctx = .{ .alloc = sh.gpa, .io = sh.io, .cwd = cwd, .env = &env };
+    if (std.mem.eql(u8, argv[0], "grep")) {
+        if (sys.stat_fd(1)) |s1| ctx.out_null = s1.is_dev_null();
+    }
     const st = run_fn(&ctx, argv, .{ .in = &in_r.interface, .out = &out_w.interface, .err = &err_w.interface });
     out_w.interface.flush() catch {};
     err_w.interface.flush() catch {};

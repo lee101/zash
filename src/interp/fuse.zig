@@ -468,6 +468,9 @@ fn stage_main(st: *Stage) void {
         .none => {},
     }
     var ctx: common.Ctx = .{ .alloc = st.sh.gpa, .io = st.sh.io, .cwd = st.cwd, .env = st.env };
+    if (std.mem.eql(u8, st.argv[0], "grep") and st.sink_out.fd >= 0) {
+        if (sys.stat_fd(st.sink_out.fd)) |s1| ctx.out_null = s1.is_dev_null();
+    }
     st.status = st.run_fn.?(&ctx, st.argv, .{ .in = in_reader, .out = st.sink_out.writer(), .err = st.sink_err.writer() });
     finish_stage(st);
 }

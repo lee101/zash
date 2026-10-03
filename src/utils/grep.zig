@@ -980,7 +980,9 @@ fn runImpl(ctx: *Ctx, argv: []const []const u8, io: Stdio) common.IoError!u8 {
         dir_decides = true;
     } else with_filename = false;
     if (cfg.quiet) cfg.no_messages = cfg.no_messages;
-    const done_on_match0 = cfg.list_match or cfg.list_nomatch or cfg.quiet;
+    const dev_null_out = ctx.out_null and !cfg.list_nomatch;
+    if (dev_null_out) cfg.count = false;
+    const done_on_match0 = cfg.list_match or cfg.list_nomatch or cfg.quiet or dev_null_out;
     const out_quiet0 = cfg.count or done_on_match0;
     var sr: Searcher = .{
         .ctx = ctx,

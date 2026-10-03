@@ -191,6 +191,11 @@ pub const Stat = struct {
     uid: u32,
     gid: u32,
     nlink: u32,
+    rdev: u64 = 0,
+
+    pub fn is_dev_null(self: Stat) bool {
+        return self.is_chr() and self.rdev == ((@as(u64, 1) << 32) | 3);
+    }
 
     pub fn kind(self: Stat) u32 {
         return self.mode & 0o170000;
@@ -230,6 +235,7 @@ fn statx_to(sx: *const linux.Statx) Stat {
         .uid = sx.uid,
         .gid = sx.gid,
         .nlink = sx.nlink,
+        .rdev = (@as(u64, sx.rdev_major) << 32) | sx.rdev_minor,
     };
 }
 

@@ -41,6 +41,7 @@ pub const Ctx = struct {
     io: Io,
     cwd: []const u8,
     env: *const EnvView,
+    out_null: bool = false,
 };
 
 pub const UtilFn = *const fn (ctx: *Ctx, argv: []const []const u8, io: Stdio) u8;
