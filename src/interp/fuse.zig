@@ -995,4 +995,3 @@ pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
 fn i_pipe_stderr(p: ast.Pipeline, i: usize) bool {
     return i < p.pipe_stderr.len and p.pipe_stderr[i];
 }
-
