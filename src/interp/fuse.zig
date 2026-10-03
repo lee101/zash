@@ -648,7 +648,6 @@ fn poll_waiters(fibers: []Fiber, fds: []sys.PollFd) void {
 
 pub fn run(sh: *Shell, p: ast.Pipeline) Err!?u8 {
     if (!supported) return null;
-    if (sh.aliases.count() > 0 or sh.pending_funcs.count() > 0) return null;
     const a = sh.sa;
     const n = p.commands.len;
     var stages = try a.alloc(Stage, n);
@@ -660,8 +659,9 @@ pub fn run(sh: *Shell, p: ast.Pipeline) Err!?u8 {
         try expand.words_fields(sh, s.words, &list);
         if (list.items.len == 0) return null;
         const name = list.items[0];
-        if (sh.funcs.contains(name)) return null;
-        if (builtins.is_builtin(name)) return null;
+        if (sh.funcs.contains(name) or builtins.is_builtin(name)) return null;
+        if (sh.pending_funcs.count() > 0 and sh.pending_funcs.contains(name)) return null;
+        if (sh.aliases.count() > 0 and sh.aliases.contains(name)) return null;
         var st: Stage = .{ .argv = list.items, .sh = sh, .group = undefined, .env = undefined, .cwd = undefined };
         if (registry.lookup(name)) |rf| {
             if (registry.supports(list.items) and exec.util_ok_stage(sh, name, c.redirs, i == 0)) {
