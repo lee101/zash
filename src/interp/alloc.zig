@@ -12,8 +12,8 @@ const cache_max_shift = 24;
 const large_count = cache_max_shift - max_shift;
 const grow_chunk: usize = 1 << 20;
 
-var next: [class_count]usize = @splat(0);
-var end: [class_count]usize = @splat(0);
+var bump_cur: usize = 0;
+var bump_end: usize = 0;
 var frees: [class_count]usize = @splat(0);
 var large_frees: [large_count]usize = @splat(0);
 var pool_cur: usize = 0;
@@ -70,21 +70,23 @@ fn block_len(len: usize) usize {
 fn alloc(_: *anyopaque, len: usize, alignment: Alignment, _: usize) ?[*]u8 {
     if (class_of(len, alignment)) |c| {
         const f = frees[c];
-        if (f != 0) {
+        if (f != 0 and f % alignment.toByteUnits() == 0) {
             const node: *usize = @ptrFromInt(f);
             frees[c] = node.*;
             return @ptrFromInt(f);
         }
         const size = @as(usize, 1) << @intCast(c + min_shift);
-        if (next[c] + size > end[c] or next[c] == 0) {
-            const p = take_bigpage();
-            if (p == 0) return null;
-            next[c] = p;
-            end[c] = p + bigpage;
+        const al = @max(alignment.toByteUnits(), @min(size, 64));
+        var p = std.mem.alignForward(usize, bump_cur, al);
+        if (p + size > bump_end or bump_cur == 0) {
+            const bp = take_bigpage();
+            if (bp == 0) return null;
+            bump_cur = bp;
+            bump_end = bp + bigpage;
+            p = bump_cur;
         }
-        const r = next[c];
-        next[c] += size;
-        return @ptrFromInt(r);
+        bump_cur = p + size;
+        return @ptrFromInt(p);
     }
     if (alignment.toByteUnits() > page) return null;
     if (large_class(len)) |c| {
