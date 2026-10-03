@@ -1529,6 +1529,7 @@ fn import_function(sh: *Shell, name: []const u8) Err!void {
 }
 
 pub fn call_function(sh: *Shell, f: *const shell.Func, args: []const []const u8) Err!u8 {
+    if (sh.frames.items.len == 12) @import("interp.zig").raise_stack_limit();
     if (sh.frames.items.len >= 2000) {
         sh.msg("{s}: maximum function nesting level exceeded (2000)", .{f.name});
         sh.status = 1;
@@ -2163,6 +2164,7 @@ pub const StringOpts = struct {
 };
 
 pub fn run_string(sh: *Shell, src: []const u8, o: StringOpts) Err!u8 {
+    if (src.len > 4096) @import("interp.zig").raise_stack_limit();
     var arena = try sh.gpa.create(std.heap.ArenaAllocator);
     arena.* = std.heap.ArenaAllocator.init(sh.gpa);
     const gen = sh.func_gen;

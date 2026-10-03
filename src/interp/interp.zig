@@ -16,7 +16,11 @@ pub fn restore_stack_limit() void {
     if (orig_stack.cur != 0) _ = sys.setrlimit(3, &orig_stack);
 }
 
-fn raise_stack_limit() void {
+var stack_raised = false;
+
+pub fn raise_stack_limit() void {
+    if (stack_raised) return;
+    stack_raised = true;
     var rl: sys.RLimit = undefined;
     if (sys.getrlimit(3, &rl) != 0) return;
     orig_stack = rl;
@@ -47,7 +51,6 @@ fn contains_icase(hay: []const u8, needle: []const u8) bool {
 }
 
 pub fn setup(sh: *Shell, environ: []const ?[*:0]const u8, script_name: []const u8) Err!void {
-    raise_stack_limit();
     const gpa = sh.gpa;
     var lc_all: ?[]const u8 = null;
     var lc_ctype: ?[]const u8 = null;
@@ -182,6 +185,7 @@ pub fn run_script(sh: *Shell, src: []const u8, label_prefix: []const u8) u8 {
 }
 
 fn run_script_inner(sh: *Shell, src: []const u8, label_prefix: []const u8) Err!u8 {
+    if (src.len > 16384) raise_stack_limit();
     var arena = try sh.gpa.create(std.heap.ArenaAllocator);
     arena.* = std.heap.ArenaAllocator.init(sh.gpa);
     try sh.keep_arenas.append(sh.gpa, arena);
