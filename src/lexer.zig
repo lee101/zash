@@ -92,7 +92,7 @@ pub const ParseError = struct {
     detail: []const u8 = "",
     src_line: []const u8 = "",
 
-    pub const Kind = enum { unexpected_token, unexpected_eof, eof_matching, eof_looking, cond_syntax, arith_for, nesting };
+    pub const Kind = enum { unexpected_token, unexpected_eof, eof_matching, eof_matching_only, eof_looking, cond_syntax, arith_for, nesting };
 
     pub fn write(self: ParseError, w: *std.Io.Writer, prefix: []const u8) std.Io.Writer.Error!void {
         switch (self.kind) {
@@ -106,6 +106,9 @@ pub const ParseError = struct {
             .eof_matching => {
                 try w.print("{s}: line {d}: unexpected EOF while looking for matching `{s}'\n", .{ prefix, self.line, self.text });
                 try w.print("{s}: line {d}: syntax error: unexpected end of file\n", .{ prefix, self.eof_line });
+            },
+            .eof_matching_only => {
+                try w.print("{s}: line {d}: unexpected EOF while looking for matching `{s}'\n", .{ prefix, self.line, self.text });
             },
             .eof_looking => {
                 try w.print("{s}: line {d}: unexpected EOF while looking for `{s}'\n", .{ prefix, self.line, self.text });
@@ -163,6 +166,8 @@ const Run = struct {
     }
 };
 
+pub const HeredocWarn = struct { op_line: u32, eof_line: u32, delimiter: []const u8 };
+
 pub const Lexer = struct {
     arena: Allocator,
     src: []const u8,
@@ -180,6 +185,7 @@ pub const Lexer = struct {
     no_heredoc: bool = false,
     no_io_number: bool = false,
     subst_depth: u32 = 0,
+    heredoc_warnings: std.ArrayList(HeredocWarn) = .empty,
 
     pub fn init(arena: Allocator, src: []const u8, opts: Options) Lexer {
         return .{ .arena = arena, .src = src, .orig = src, .extglob = opts.extglob };
@@ -403,6 +409,11 @@ pub const Lexer = struct {
                 var j = self.pos + 1;
                 if (j < src.len and is_name_start(src[j])) {
                     while (j < src.len and is_name_char(src[j])) j += 1;
+                    if (j + 1 < src.len and src[j] == '[') {
+                        if (std.mem.findScalarPos(u8, src, j, ']')) |close| {
+                            if (close > j + 1 and std.mem.findAny(u8, src[j..close], " \t\n") == null) j = close + 1;
+                        }
+                    }
                     if (j + 1 < src.len and src[j] == '}' and (src[j + 1] == '<' or src[j + 1] == '>') and !(j + 2 < src.len and src[j + 2] == '(')) {
                         const s = self.pos;
                         const name = src[s + 1 .. j];
@@ -596,7 +607,11 @@ pub const Lexer = struct {
                     while (self.pos < self.src.len and self.src[self.pos] != '\n') self.pos += 1;
                 } else break;
             }
-            if (self.pos >= self.src.len) return self.fail_matching(")", open - 1);
+            if (self.pos >= self.src.len) {
+                _ = self.fail_matching(")", open - 1) catch {};
+                if (self.err) |*e| e.kind = .eof_matching_only;
+                return error.Syntax;
+            }
             if (self.src[self.pos] == ')') {
                 self.pos += 1;
                 break;
@@ -1459,9 +1474,11 @@ pub const Lexer = struct {
         const src = self.src;
         var list = self.pending;
         self.pending = .empty;
+        const op_line = self.line_at(self.pos) -| 1;
         for (list.items) |h| {
             const body_start = self.pos;
             var body_end = body_start;
+            var found = false;
             while (self.pos < src.len) {
                 const ls = self.pos;
                 const le = std.mem.findScalarPos(u8, src, ls, '\n') orelse src.len;
@@ -1469,13 +1486,18 @@ pub const Lexer = struct {
                 var line = raw;
                 if (h.strip_tabs) line = std.mem.trimStart(u8, line, "\t");
                 self.pos = @min(le + 1, src.len);
-                if (std.mem.eql(u8, line, h.delimiter)) break;
+                if (std.mem.eql(u8, line, h.delimiter)) {
+                    found = true;
+                    break;
+                }
                 if (self.subst_depth > 0 and line.len > h.delimiter.len and line[h.delimiter.len] == ')' and std.mem.startsWith(u8, line, h.delimiter)) {
                     self.pos = ls + (raw.len - line.len) + h.delimiter.len;
+                    found = true;
                     break;
                 }
                 body_end = self.pos;
             }
+            if (!found) try self.heredoc_warnings.append(self.arena, .{ .op_line = op_line, .eof_line = self.eof_line() -| 1, .delimiter = h.delimiter });
             var text: []const u8 = src[body_start..body_end];
             if (h.strip_tabs and text.len > 0) {
                 var out: std.ArrayList(u8) = .empty;

@@ -157,6 +157,12 @@ pub fn install_signals(sh: *Shell) void {
     sys.set_signal(sys.SIGINT, sys.SIG_DFL);
 }
 
+fn warn_script(sh: *Shell, lex: *const @import("../lexer.zig").Lexer, prefix: []const u8) void {
+    for (lex.heredoc_warnings.items) |w| {
+        sh.msg_raw("{s}: line {d}: warning: here-document at line {d} delimited by end-of-file (wanted `{s}')\n", .{ prefix, w.eof_line, w.op_line, w.delimiter });
+    }
+}
+
 fn line_start_offsets(a: std.mem.Allocator, src: []const u8) ![]usize {
     var offs: std.ArrayList(usize) = .empty;
     try offs.append(a, 0);
@@ -183,6 +189,7 @@ fn run_script_inner(sh: *Shell, src: []const u8, label_prefix: []const u8) Err!u
     var p = parser.Parser.init(a, src, .{});
     const res = p.parse_script();
     if (res) |list| {
+        warn_script(sh, &p.lex, label_prefix);
         if (sh.dash_c) exec.mark_final_list(sh, list);
         const st = try exec.run_top(sh, list, src);
         return finish(sh, st);
@@ -190,6 +197,7 @@ fn run_script_inner(sh: *Shell, src: []const u8, label_prefix: []const u8) Err!u
         error.OutOfMemory => return error.OutOfMemory,
         error.Syntax => {
             const err = p.lex.err.?;
+            warn_script(sh, &p.lex, label_prefix);
             const offs = try line_start_offsets(a, src);
             var cut: usize = @min(@as(usize, err.line), offs.len);
             while (cut > 1) {
@@ -207,7 +215,7 @@ fn run_script_inner(sh: *Shell, src: []const u8, label_prefix: []const u8) Err!u
             var aw = std.Io.Writer.Allocating.init(sh.sa);
             err.write(&aw.writer, label_prefix) catch {};
             _ = sys.write_all(2, aw.written());
-            return finish(sh, 2);
+            return finish(sh, if (err.kind == .eof_matching_only) 1 else 2);
         },
     }
 }
@@ -349,7 +357,7 @@ pub fn run_interactive(sh: *Shell) u8 {
                 error.OutOfMemory => break,
                 error.Syntax => {
                     const err = err_opt.?;
-                    const incomplete = err.kind == .unexpected_eof or err.kind == .eof_matching or err.kind == .eof_looking;
+                    const incomplete = err.kind == .unexpected_eof or err.kind == .eof_matching or err.kind == .eof_matching_only or err.kind == .eof_looking;
                     if (incomplete and !eof) continue;
                     var aw = std.Io.Writer.Allocating.init(sh.sa);
                     err.write(&aw.writer, "zash") catch {};

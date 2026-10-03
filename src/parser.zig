@@ -44,6 +44,7 @@ pub const Parser = struct {
     clauses: std.ArrayList(ast.IfClause) = .empty,
     case_clauses: std.ArrayList(ast.CaseClause) = .empty,
     pipes: std.ArrayList(bool) = .empty,
+    last_end: u32 = 0,
 
     pub fn init(arena: Allocator, src: []const u8, opts: Options) Parser {
         return .{ .lex = Lexer.init(arena, src, opts) };
@@ -122,11 +123,20 @@ pub const Parser = struct {
     }
 
     fn advance(self: *Parser, assign_ok: bool) Error!void {
+        self.last_end = self.tok.end;
         self.tok = try self.lex.next(assign_ok);
     }
 
     fn cond_advance(self: *Parser, regex: bool) Error!void {
+        self.last_end = self.tok.end;
         self.tok = try self.lex.next_cond(regex);
+    }
+
+    fn end_line_from(self: *Parser, start_off: u32, line: u32) u32 {
+        const orig = self.lex.orig;
+        const lo: usize = @min(start_off, orig.len);
+        const hi: usize = @min(@max(self.last_end, start_off), orig.len);
+        return line + @as(u32, @intCast(std.mem.countScalar(u8, orig[lo..hi], '\n')));
     }
 
     fn unexpected(self: *Parser) Error {
@@ -265,6 +275,7 @@ pub const Parser = struct {
         defer self.lex.depth -= 1;
         if (self.lex.depth > lexer.max_depth) return self.lex.fail_nesting();
         const line = self.lex.line_at(self.tok.start);
+        const start_off = self.tok.start;
         var cmd: ast.Command = undefined;
         switch (self.tok.tag) {
             .word => switch (self.tok.kw) {
@@ -278,13 +289,22 @@ pub const Parser = struct {
                 .kw_dlbracket => cmd = try self.parse_cond_command(),
                 .kw_coproc => cmd = try self.parse_coproc(),
                 .kw_then, .kw_else, .kw_elif, .kw_fi, .kw_do, .kw_done, .kw_esac, .kw_rbrace, .kw_bang, .kw_time => return self.unexpected(),
-                else => return self.parse_simple(line),
+                else => {
+                    var sc = try self.parse_simple(line);
+                    sc.end_line = self.end_line_from(start_off, line);
+                    return sc;
+                },
             },
             .lparen => cmd = try self.parse_subshell(),
-            else => return self.parse_simple(line),
+            else => {
+                var sc = try self.parse_simple(line);
+                sc.end_line = self.end_line_from(start_off, line);
+                return sc;
+            },
         }
         cmd.line = line;
         cmd.redirs = try self.parse_trailing_redirs();
+        cmd.end_line = self.end_line_from(start_off, line);
         return cmd;
     }
 
@@ -392,7 +412,7 @@ pub const Parser = struct {
 
     fn is_decl_name(w: ast.Word) bool {
         const t = ast.word_is_plain_lit(w) orelse return false;
-        const names = [_][]const u8{ "declare", "typeset", "local", "export", "readonly" };
+        const names = [_][]const u8{ "declare", "typeset", "local", "export", "readonly", "eval" };
         for (names) |n| if (std.mem.eql(u8, t, n)) return true;
         return false;
     }
@@ -499,7 +519,7 @@ pub const Parser = struct {
                 const e = try arith_parse.parse_region(&self.lex, s + 2, end);
                 self.lex.pos = end + 2;
                 try self.advance(true);
-                return .{ .body = .{ .arith_cmd = e } };
+                return .{ .body = .{ .arith_cmd = e }, .src = src[s + 2 .. end] };
             }
         }
         const double = s + 1 < src.len and src[s + 1] == '(';
@@ -1338,7 +1358,7 @@ test "syntax error messages" {
         .{ "echo ${a:-\"b}", "zash: -c: line 1: unexpected EOF while looking for matching `\"'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
         .{ "echo \"${a\"", "zash: -c: line 1: unexpected EOF while looking for matching `}'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
         .{ "if [ a ]; then\n  b\nelif", "zash: -c: line 4: syntax error: unexpected end of file\n" },
-        .{ "x=(a b", "zash: -c: line 1: unexpected EOF while looking for matching `)'\nzash: -c: line 2: syntax error: unexpected end of file\n" },
+        .{ "x=(a b", "zash: -c: line 1: unexpected EOF while looking for matching `)'\n" },
         .{ "x=(a b)) c", "zash: -c: line 1: syntax error near unexpected token `)'\nzash: -c: line 1: `x=(a b)) c'\n" },
         .{ "echo $(( 1 + (2 )", "zash: -c: line 1: syntax error near unexpected token `('\nzash: -c: line 1: `echo $(( 1 + (2 )'\n" },
         .{ "function f() ", "zash: -c: line 2: syntax error: unexpected end of file\n" },

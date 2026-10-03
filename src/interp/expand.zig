@@ -8,6 +8,7 @@ const arith = @import("arith.zig");
 const strutil = @import("strutil.zig");
 const exec = @import("exec.zig");
 const unparse = @import("unparse.zig");
+const parser = @import("../parser.zig");
 const Shell = shell.Shell;
 const Err = shell.Err;
 const Allocator = std.mem.Allocator;
@@ -337,7 +338,58 @@ pub fn words_fields(sh: *Shell, words: []const ast.Word, out: *std.ArrayList([]c
     for (words) |w| try word_fields(sh, w, out);
 }
 
-pub fn word_string(sh: *Shell, w: ast.Word) Err![]const u8 {
+fn fix_ansi(sh: *Shell, w: ast.Word) Err!ast.Word {
+    var needs = false;
+    for (w.parts) |p| switch (p) {
+        .lit => |t| if (std.mem.find(u8, t, "$'") != null) {
+            needs = true;
+        },
+        else => {},
+    };
+    if (!needs) return w;
+    const a = sh.sa;
+    var list: std.ArrayList(ast.Part) = .empty;
+    for (w.parts) |p| switch (p) {
+        .lit => |t| {
+            var i: usize = 0;
+            var start: usize = 0;
+            while (i < t.len) {
+                if (t[i] == '$' and i + 1 < t.len and t[i + 1] == '\'') {
+                    var j = i + 2;
+                    while (j < t.len and t[j] != '\'') {
+                        if (t[j] == '\\' and j + 1 < t.len) j += 1;
+                        j += 1;
+                    }
+                    if (j < t.len) {
+                        if (i > start) try list.append(a, .{ .lit = t[start..i] });
+                        var out: std.ArrayList(u8) = .empty;
+                        var k = i + 2;
+                        while (k < j) {
+                            if (t[k] == '\\' and k + 1 < j) {
+                                const r = try strutil.ansi_escape(a, &out, t[0..j], k + 1, true);
+                                k += 1 + r.consumed;
+                            } else {
+                                try out.append(a, t[k]);
+                                k += 1;
+                            }
+                        }
+                        try list.append(a, .{ .ansi_c = out.items });
+                        i = j + 1;
+                        start = i;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            if (start < t.len) try list.append(a, .{ .lit = t[start..] });
+        },
+        else => try list.append(a, p),
+    };
+    return .{ .parts = list.items, .line = w.line };
+}
+
+pub fn word_string(sh: *Shell, w_in: ast.Word) Err![]const u8 {
+    const w = try fix_ansi(sh, w_in);
     if (w.parts.len == 0) return "";
     if (w.parts.len == 1) {
         switch (w.parts[0]) {
@@ -359,7 +411,8 @@ pub fn word_string_unquoted(sh: *Shell, w: ast.Word) Err![]const u8 {
     return b.cur.items;
 }
 
-pub fn word_pattern(sh: *Shell, w: ast.Word) Err![]const u8 {
+pub fn word_pattern(sh: *Shell, w_in: ast.Word) Err![]const u8 {
+    const w = try fix_ansi(sh, w_in);
     var dummy: std.ArrayList([]const u8) = .empty;
     var b = new_builder(sh, .pattern, &dummy);
     try parts(&b, w.parts, false);
@@ -446,8 +499,42 @@ fn part(b: *B, p: ast.Part, quoted: bool) Err!void {
             return b.add_raw(t);
         },
         .brace_list, .brace_seq => return,
-        .array_init => return,
+        .array_init => |elems| {
+            try b.add_raw("(");
+            for (elems, 0..) |el, i| {
+                if (i > 0) try b.add_raw(" ");
+                if (el.key) |k| {
+                    try b.add_raw("[");
+                    try b.add_raw(try word_string(sh, k));
+                    try b.add_raw("]=");
+                }
+                var fields: std.ArrayList([]const u8) = .empty;
+                try word_fields(sh, el.value, &fields);
+                for (fields.items, 0..) |f, j| {
+                    if (j > 0) try b.add_raw(" ");
+                    try b.add_raw(f);
+                }
+            }
+            try b.add_raw(")");
+        },
         .bad_subst => |t| {
+            if (t.len > 2 and t[0] == '$' and t[1] == '(') {
+                switch (parser.parse(sh.sa, t[2..], .{})) {
+                    .err => |pe| {
+                        var e2 = pe;
+                        e2.line += sh.lineno;
+                        e2.eof_line += sh.lineno;
+                        const file = if (sh.cur_file.len > 0) sh.cur_file else sh.script_name;
+                        const prefix = try std.fmt.allocPrint(sh.sa, "{s}: command substitution", .{file});
+                        var aw = std.Io.Writer.Allocating.init(sh.sa);
+                        e2.write(&aw.writer, prefix) catch {};
+                        _ = sys.write_all(2, aw.written());
+                        sh.status = 1;
+                        return error.Abort;
+                    },
+                    .ok => {},
+                }
+            }
             sh.msg("{s}: bad substitution", .{t});
             sh.status = 1;
             return error.Abort;

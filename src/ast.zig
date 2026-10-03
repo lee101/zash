@@ -297,6 +297,8 @@ pub const Command = struct {
     body: Body,
     redirs: []const Redirect = &.{},
     line: u32 = 0,
+    end_line: u32 = 0,
+    src: []const u8 = "",
 };
 
 pub const TimeMode = enum { none, time, time_posix };

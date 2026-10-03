@@ -1,16 +1,16 @@
-# AST and parser requests from the interpreter workstream
+# AST and parser changes made by the interpreter workstream
 
-Additive requests only. The interpreter works without them, each one closes a remaining differential case.
+The parser workstream looked idle, so the interpreter workstream applied these small, additive fixes directly. Each one closes a differential case or a real script from a system scan.
 
-- `ast.Command`: add `arith_src: []const u8 = ""` holding the raw text between `((` and `))` for `(( expr ))` commands (xtrace prints `((  1 + 1  ))`, `declare -f` prints `(( x = 1 + 2 ))`). Same for the three clauses of `for (( ; ; ))` if cheap.
-- Lexer: inside double quotes, `${x%%$'\n'*}` must treat `$'...'` in the pattern word as ANSI-C quoting (bash does). Case: command-subst/read-file.
-- Lexer: unterminated heredoc should surface a warning (`line N: warning: here-document at line M delimited by end-of-file (wanted `EOF')`) on stderr, for example as an extra field on the parse result. Cases: heredoc/eof-unterminated, errors/syntax-unexpected-eof-heredoc.
-- Parse errors: `a=(1 2` at EOF must print only the first line (`unexpected EOF while looking for matching `)'`) without the extra `syntax error: unexpected end of file`. Case: errors/syntax-array-literal.
-- Syntax error inside `$( ... )` should report `PREFIX: command substitution: line N: syntax error near unexpected token `)'` plus the quoted source line, instead of `bad substitution`. Case: errors/syntax-in-cmdsubst.
-- `Command.line` for a simple command whose words span several lines is the line of the last token in bash (LINENO and eval line numbers). Case: builtin-eval/line-numbers.
-- Arithmetic parse errors at end of input: the error token is the last operator token (`1+` reports token `+`), currently empty.
-- Lexer: `{CP[1]}>&-` and `{arr[0]}>file` (named fd redirection with an array element) must lex as `io_var` with name `CP[1]`. Case: jobs/coproc.
-- Parser: `eval local D2B=($x)` inside a function body is a syntax error in zash but valid in bash (compound assignment words are accepted after `eval` and `time`). Works at top level, fails inside `f() { ... }`. Found with samples/pktgen/functions.sh from the kernel headers.
-- Lexer: backslash-newline inside `$(( ... ))` must be removed before arithmetic parsing (kernel Documentation/arch/arm64/kasan-offsets.sh).
-- AST: keep `${x}` distinguishable from `$x` (bash prints the original `${2}` in `ambiguous redirect` errors and in `declare -f`). For example a `braced: bool` on the variable part or a `.param` with an empty op.
-- AST: add `Command.end_line: u32` (line of the last token). bash reports redirection errors on compound commands (`done > "$out"`), LINENO in multi-line command substitutions, and `eval` line numbers with the end line, not the start line.
+- `ast.Command.end_line`: line of the last token of the command. Used for `eval` line numbers and for redirection errors on compound commands, matching bash.
+- `ast.Command.src`: raw text between `((` and `))` for `(( expr ))` commands. Used for xtrace (`((  1 + 1  ))`) and `declare -f`.
+- Parser: `eval` accepts compound assignment words (`eval local x=($y)`), as bash does.
+- Lexer: `{name[idx]}>file` and `{name[idx]}>&-` lex as named fd redirections.
+- Arithmetic parser: backslash-newline is whitespace.
+- Lexer: unterminated heredocs record a warning (`Lexer.heredoc_warnings`) printed by the interpreter.
+- Parse error: `a=(1 2` at end of input prints only the `unexpected EOF while looking for matching` line (bash behavior) and exits 1.
+
+Known remaining differences worth a parser pass:
+
+- `${x}` and `$x` produce the same AST part, so `ambiguous redirect` errors and `declare -f` print `$x`.
+- Arithmetic parse error tokens: `1+` reports token `+` in bash. The interpreter patches this up from the expression text.

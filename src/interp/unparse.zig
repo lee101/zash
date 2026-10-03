@@ -354,7 +354,7 @@ pub const W = struct {
             },
             .arith_cmd => |n| {
                 try self.put("((");
-                try arith.render(self.sh, n, &self.out);
+                if (c.src.len > 0) try self.put(c.src) else try arith.render(self.sh, n, &self.out);
                 try self.put("))");
             },
             .coproc => |cp| {
@@ -743,9 +743,15 @@ pub const Pretty = struct {
                 try self.put(" ]]");
             },
             .arith_cmd => |n| {
-                try self.put("(( ");
-                try arith.render(self.w.sh, n, &self.w.out);
-                try self.put(" ))");
+                if (c.src.len > 0) {
+                    try self.put("((");
+                    try self.put(c.src);
+                    try self.put("))");
+                } else {
+                    try self.put("(( ");
+                    try arith.render(self.w.sh, n, &self.w.out);
+                    try self.put(" ))");
+                }
             },
             .coproc => |cp| {
                 try self.put("coproc ");

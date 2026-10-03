@@ -41,6 +41,11 @@ const A = struct {
         while (lx.pos < lx.src.len) : (lx.pos += 1) {
             switch (lx.src[lx.pos]) {
                 ' ', '\t', '\n' => {},
+                '\\' => {
+                    if (lx.pos + 1 < lx.src.len and lx.src[lx.pos + 1] == '\n') {
+                        lx.pos += 1;
+                    } else break;
+                },
                 else => break,
             }
         }

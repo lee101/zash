@@ -522,6 +522,7 @@ pub fn run_command(sh: *Shell, c: *const ast.Command, final: bool) Err!u8 {
     if (c.redirs.len == 0) return run_body(sh, c, final);
     var scope: redir.Scope = .{};
     defer scope.restore(sh);
+    if (c.end_line != 0) sh.lineno = c.end_line;
     if (!try redir.apply(sh, c.redirs, &scope)) {
         sh.status = 1;
         try errexit_check(sh, 1);
@@ -886,15 +887,16 @@ fn run_cond(sh: *Shell, cd: *const ast.Cond, c: *const ast.Command) Err!u8 {
 }
 
 fn run_arith_cmd(sh: *Shell, n: *const ast.Arith, c: *const ast.Command) Err!u8 {
-    _ = c;
     const m = sh.scratch.mark();
     defer sh.scratch.release(m);
     if (sh.opt(.xtrace)) {
         var w: std.ArrayList(u8) = .empty;
         try ps4(sh, &w);
-        try w.appendSlice(sh.sa, "((  ");
-        try arith.render(sh, n, &w);
-        try w.appendSlice(sh.sa, "  ))\n");
+        try w.appendSlice(sh.sa, "(( ");
+        if (c.src.len > 0) {
+            try w.appendSlice(sh.sa, try expand_dq_text(sh, c.src));
+        } else try arith.render(sh, n, &w);
+        try w.appendSlice(sh.sa, " ))\n");
         _ = sys.write_all(2, w.items);
     }
     const v = (try eval_arith_node(sh, n, .command)) orelse return 1;
@@ -2086,12 +2088,14 @@ pub fn run_string(sh: *Shell, src: []const u8, o: StringOpts) Err!u8 {
     p.lex.cache_line = p.lex.line_base;
     const list = p.parse_script() catch |e| switch (e) {
         error.Syntax => {
+            report_warnings(sh, &p.lex, o.label);
             report_parse_error(sh, p.lex.err.?, o.label);
             sh.status = 2;
             return 2;
         },
         error.OutOfMemory => return error.OutOfMemory,
     };
+    report_warnings(sh, &p.lex, o.label);
     const saved_line = sh.lineno;
     defer sh.lineno = saved_line;
     return run_top_inner(sh, list, src_copy, o.line_base);
@@ -2110,6 +2114,14 @@ fn run_top_inner(sh: *Shell, list: ast.List, src: []const u8, base: u32) Err!u8 
         try check_signals(sh);
     }
     return status;
+}
+
+pub fn report_warnings(sh: *Shell, lex: *const lexer.Lexer, label: []const u8) void {
+    const file = if (sh.cur_file.len > 0) sh.cur_file else sh.script_name;
+    for (lex.heredoc_warnings.items) |w| {
+        const pre = if (label.len > 0) (std.fmt.allocPrint(sh.sa, "{s}: {s}", .{ file, label }) catch file) else file;
+        sh.msg_raw("{s}: line {d}: warning: here-document at line {d} delimited by end-of-file (wanted `{s}')\n", .{ pre, w.eof_line, w.op_line, w.delimiter });
+    }
 }
 
 pub fn report_parse_error(sh: *Shell, e: lexer.ParseError, label: []const u8) void {
@@ -2139,11 +2151,13 @@ pub fn run_source_text(sh: *Shell, src: []const u8, file: []const u8, line_base:
     p.lex.cache_line = p.lex.line_base;
     const list = p.parse_script() catch |e| switch (e) {
         error.Syntax => {
+            report_warnings(sh, &p.lex, "");
             report_parse_error(sh, p.lex.err.?, "");
             sh.status = 2;
             return 2;
         },
         error.OutOfMemory => return error.OutOfMemory,
     };
+    report_warnings(sh, &p.lex, "");
     return run_top(sh, list, src_copy);
 }

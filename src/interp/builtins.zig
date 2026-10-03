@@ -845,7 +845,10 @@ fn bi_eval(sh: *Shell, argv: []const []const u8) Err!u8 {
     if (std.mem.trim(u8, text, " \t\n").len == 0) return 0;
     sh.eval_depth += 1;
     defer sh.eval_depth -= 1;
-    const line = sh.lineno;
+    var line = sh.lineno;
+    if (sh.cur_cmd) |cc| {
+        if (cc.end_line > line) line = cc.end_line;
+    }
     const st = try exec.run_string(sh, text, .{ .label = "eval", .line_base = if (line > 0) line - 1 else 0 });
     sh.lineno = line;
     return st;
