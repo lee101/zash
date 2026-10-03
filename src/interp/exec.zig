@@ -13,6 +13,7 @@ const unparse = @import("unparse.zig");
 const strutil = @import("strutil.zig");
 const plan = @import("plan.zig");
 const fuse = @import("fuse.zig");
+const pspawn = @import("pspawn.zig");
 const registry = @import("../utils/registry.zig");
 const common = @import("../utils/common.zig");
 const Shell = shell.Shell;
@@ -1774,6 +1775,9 @@ fn spawn(sh: *Shell, path: []const u8, argv: []const []const u8, redirs: []const
     const env = try sh.env_block_get();
     const envp: [*:null]const ?[*:0]const u8 = @ptrCast(env.ptrs.items.ptr);
     if (!final) {
+        if (redirs_spawnable(sh, redirs)) {
+            if (spawn_fast(sh, pz, argz, envp, redirs)) |pid| return wait_report(sh, pid);
+        }
         const pid = sys.fork();
         if (pid < 0) {
             sh.msg("fork: {s}", .{sys.msg_for(sys.errno())});
@@ -1793,6 +1797,84 @@ fn spawn(sh: *Shell, path: []const u8, argv: []const []const u8, redirs: []const
     _ = sys.execve(pz, argz, envp);
     const st = exec_failed(sh, path, argv);
     return st;
+}
+
+fn redirs_spawnable(sh: *Shell, redirs: []const ast.Redirect) bool {
+    if (redirs.len == 0) return true;
+    if (sh.opt(.noclobber)) return false;
+    for (redirs) |r| {
+        switch (r.fd) {
+            .named => return false,
+            .num => |n| if (n > 2) return false,
+            .none => {},
+        }
+        const t = plain_lit(r.target) orelse return false;
+        switch (r.op) {
+            .in, .out, .append, .clobber, .out_err, .append_err => if (t.len == 0 or t.len >= 4096) return false,
+            .dup_out => if (!(std.mem.eql(u8, t, "1") or std.mem.eql(u8, t, "2"))) return false,
+            else => return false,
+        }
+    }
+    return true;
+}
+
+var exec_ok_cache: std.StringHashMapUnmanaged(void) = .empty;
+
+pub fn exec_magic_ok(sh: *Shell, path: []const u8) bool {
+    if (exec_ok_cache.contains(path)) return true;
+    var buf: [4096]u8 = undefined;
+    const z = sys.cstr(&buf, path) orelse return false;
+    const fd = sys.open(z, sys.O.RDONLY | sys.O.CLOEXEC);
+    if (fd < 0) return false;
+    defer _ = sys.close(fd);
+    var head: [4]u8 = undefined;
+    const n = sys.read_some(fd, &head);
+    if (n < 2) return false;
+    const ok = (head[0] == '#' and head[1] == '!') or (n >= 4 and std.mem.eql(u8, &head, "\x7fELF"));
+    if (!ok) return false;
+    const k = sh.gpa.dupe(u8, path) catch return true;
+    exec_ok_cache.put(sh.gpa, k, {}) catch sh.gpa.free(k);
+    return true;
+}
+
+fn spawn_fast(sh: *Shell, pz: [*:0]const u8, argz: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8, redirs: []const ast.Redirect) ?c_int {
+    if (!exec_magic_ok(sh, std.mem.span(pz))) return null;
+    var sp: pspawn.Spawn = .{};
+    if (!sp.init(false)) return null;
+    defer sp.deinit();
+    const a = sh.sa;
+    for (redirs) |r| {
+        const t = plain_lit(r.target).?;
+        const fd: c_int = switch (r.fd) {
+            .num => |n| @intCast(n),
+            else => switch (r.op) {
+                .in => 0,
+                else => 1,
+            },
+        };
+        switch (r.op) {
+            .in, .out, .append, .clobber, .out_err, .append_err => {
+                const tz = a.dupeZ(u8, t) catch return null;
+                const flags: c_int = switch (r.op) {
+                    .in => sys.O.RDONLY,
+                    .append, .append_err => sys.O.WRONLY | sys.O.CREAT | sys.O.APPEND,
+                    else => sys.O.WRONLY | sys.O.CREAT | sys.O.TRUNC,
+                };
+                if (!sp.open(fd, tz.ptr, flags)) return null;
+                if (r.op == .out_err or r.op == .append_err) {
+                    if (!sp.dup2(1, 2)) return null;
+                }
+            },
+            .dup_out => {
+                const src: c_int = if (t[0] == '1') 1 else 2;
+                if (src != fd and !sp.dup2(src, fd)) return null;
+            },
+            else => return null,
+        }
+    }
+    var pid: c_int = 0;
+    if (sp.go(&pid, pz, argz, envp) != 0) return null;
+    return pid;
 }
 
 pub fn child_prepare_exec(sh: *Shell) void {
