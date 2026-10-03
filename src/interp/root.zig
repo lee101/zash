@@ -1,4 +1,5 @@
 pub const sys = @import("sys.zig");
+pub const alloc = @import("alloc.zig");
 pub const shell = @import("shell.zig");
 pub const exec = @import("exec.zig");
 pub const builtins = @import("builtins.zig");
@@ -10,6 +11,7 @@ pub const run_interactive = @import("interp.zig").run_interactive;
 
 test {
     _ = @import("bump.zig");
+    _ = @import("alloc.zig");
     _ = @import("vars.zig");
     _ = @import("pattern.zig");
     _ = @import("builtins.zig");

@@ -13,7 +13,7 @@ const Shell = shell.Shell;
 const Err = shell.Err;
 const Io = std.Io;
 
-const use_asm = builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64;
+const use_asm = builtin.cpu.arch == .x86_64;
 
 pub const supported = builtin.os.tag == .linux and (builtin.cpu.arch == .x86_64 or (builtin.cpu.arch == .aarch64 and builtin.abi.isGnu()));
 
@@ -53,35 +53,6 @@ fn ctx_switch_asm() callconv(.naked) void {
             \\popq %%rbp
             \\retq
         ),
-        .aarch64 => asm volatile (
-            \\sub sp, sp, #176
-            \\stp x19, x20, [sp, #0]
-            \\stp x21, x22, [sp, #16]
-            \\stp x23, x24, [sp, #32]
-            \\stp x25, x26, [sp, #48]
-            \\stp x27, x28, [sp, #64]
-            \\stp x29, x30, [sp, #80]
-            \\stp d8, d9, [sp, #96]
-            \\stp d10, d11, [sp, #112]
-            \\stp d12, d13, [sp, #128]
-            \\stp d14, d15, [sp, #144]
-            \\mov x2, sp
-            \\str x2, [x0]
-            \\ldr x2, [x1]
-            \\mov sp, x2
-            \\ldp x19, x20, [sp, #0]
-            \\ldp x21, x22, [sp, #16]
-            \\ldp x23, x24, [sp, #32]
-            \\ldp x25, x26, [sp, #48]
-            \\ldp x27, x28, [sp, #64]
-            \\ldp x29, x30, [sp, #80]
-            \\ldp d8, d9, [sp, #96]
-            \\ldp d10, d11, [sp, #112]
-            \\ldp d12, d13, [sp, #128]
-            \\ldp d14, d15, [sp, #144]
-            \\add sp, sp, #176
-            \\ret
-        ),
         else => unreachable,
     }
 }
@@ -102,12 +73,6 @@ fn ctx_init(c: *Ctx, stack: []u8, entry: *const fn () callconv(.c) void) void {
                 frame[6] = @intFromPtr(entry);
                 frame[7] = 0;
                 c.sp = top - 64;
-            },
-            .aarch64 => {
-                const frame: [*]usize = @ptrFromInt(top - 176);
-                @memset(frame[0..22], 0);
-                frame[11] = @intFromPtr(entry);
-                c.sp = top - 176;
             },
             else => unreachable,
         }

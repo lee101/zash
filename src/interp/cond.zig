@@ -85,7 +85,7 @@ fn do_regex(sh: *Shell, text: []const u8, rx: []const u8) Err!u8 {
     const rc = sys.regcomp(&re, rz.ptr, cflags);
     if (rc != 0) return 2;
     defer sys.regfree(&re);
-    const nsub = std.mem.readInt(usize, re.buf[48..56], .little);
+    const nsub = sys.regex_nsub(&re);
     const nmatch = @min(nsub + 1, 64);
     var matches: [64]sys.RegMatch = undefined;
     const tz = try sh.sa.allocSentinel(u8, text.len, 0);

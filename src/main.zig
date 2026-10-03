@@ -36,7 +36,7 @@ pub fn main(argc: c_int, argv: [*][*:0]u8) callconv(.c) c_int {
 }
 
 fn real_main(argc: usize, argv_in: [*][*:0]u8, env_ptrs_in: []const ?[*:0]const u8) u8 {
-    const gpa = std.heap.c_allocator;
+    const gpa = interp.alloc.allocator_instance;
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const arena = arena_state.allocator();
     const args = arena.alloc([:0]const u8, argc) catch return 1;

@@ -116,7 +116,12 @@ pub const Timespec = extern struct { sec: i64, nsec: i64 };
 pub const Passwd = extern struct { name: [*:0]const u8, passwd: [*:0]const u8, uid: c_uint, gid: c_uint, gecos: [*:0]const u8, dir: [*:0]const u8, shell: [*:0]const u8 };
 pub const RUsage = extern struct { utime: [2]i64, stime: [2]i64, rest: [14]c_long };
 pub const Regex = extern struct { buf: [64]u8 align(8) = undefined };
-pub const RegMatch = extern struct { so: c_int, eo: c_int };
+pub const RegMatch = if (builtin.abi.isMusl()) extern struct { so: c_long, eo: c_long } else extern struct { so: c_int, eo: c_int };
+
+pub fn regex_nsub(re: *const Regex) usize {
+    const off: usize = if (builtin.abi.isMusl()) 0 else 48;
+    return std.mem.readInt(usize, re.buf[off..][0..8], .little);
+}
 pub const SigSet = extern struct { bits: [16]u64 = .{0} ** 16 };
 pub const SigAction = extern struct {
     handler: usize,

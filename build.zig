@@ -3,6 +3,16 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const static = b.option(bool, "static", "Build the zash executable as a static musl binary on linux x86_64 (default true; fastest startup)") orelse true;
+    const exe_target = blk: {
+        if (static and target.result.os.tag == .linux and target.result.cpu.arch == .x86_64 and target.result.abi != .musl) {
+            var q = target.query;
+            q.abi = .musl;
+            q.glibc_version = null;
+            break :blk b.resolveTargetQuery(q);
+        }
+        break :blk target;
+    };
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this text");
 
     const lib_mod = b.addModule("zash", .{
@@ -14,7 +24,7 @@ pub fn build(b: *std.Build) void {
 
     const exe_lib = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
-        .target = target,
+        .target = exe_target,
         .optimize = optimize,
         .link_libc = true,
         .single_threaded = true,
@@ -31,7 +41,7 @@ pub fn build(b: *std.Build) void {
         .name = "zash",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = target,
+            .target = exe_target,
             .optimize = optimize,
             .link_libc = true,
             .single_threaded = true,
