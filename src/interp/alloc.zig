@@ -8,11 +8,14 @@ const bigpage: usize = 64 * 1024;
 const min_shift = 4;
 const max_shift = 16;
 const class_count = max_shift - min_shift + 1;
+const cache_max_shift = 24;
+const large_count = cache_max_shift - max_shift;
 const grow_chunk: usize = 1 << 20;
 
 var next: [class_count]usize = @splat(0);
 var end: [class_count]usize = @splat(0);
 var frees: [class_count]usize = @splat(0);
+var large_frees: [large_count]usize = @splat(0);
 var pool_cur: usize = 0;
 var pool_end: usize = 0;
 
@@ -50,8 +53,18 @@ fn class_of(len: usize, alignment: Alignment) ?usize {
     return shift - min_shift;
 }
 
+fn large_class(len: usize) ?usize {
+    if (len > (1 << cache_max_shift)) return null;
+    return std.math.log2_int_ceil(usize, len) - max_shift - 1;
+}
+
 fn large_len(len: usize) usize {
     return std.mem.alignForward(usize, len, page);
+}
+
+fn block_len(len: usize) usize {
+    if (large_class(len)) |c| return @as(usize, 1) << @intCast(c + max_shift + 1);
+    return large_len(len);
 }
 
 fn alloc(_: *anyopaque, len: usize, alignment: Alignment, _: usize) ?[*]u8 {
@@ -74,7 +87,15 @@ fn alloc(_: *anyopaque, len: usize, alignment: Alignment, _: usize) ?[*]u8 {
         return @ptrFromInt(r);
     }
     if (alignment.toByteUnits() > page) return null;
-    const r = map(large_len(len));
+    if (large_class(len)) |c| {
+        const f = large_frees[c];
+        if (f != 0) {
+            const node: *usize = @ptrFromInt(f);
+            large_frees[c] = node.*;
+            return @ptrFromInt(f);
+        }
+    }
+    const r = map(block_len(len));
     if (r == 0) return null;
     return @ptrFromInt(r);
 }
@@ -85,10 +106,10 @@ fn resize(_: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, _: usi
         return c == nc;
     }
     if (class_of(new_len, alignment) != null) return false;
-    const old = large_len(buf.len);
-    const new = large_len(new_len);
+    const old = block_len(buf.len);
+    const new = block_len(new_len);
     if (old == new) return true;
-    if (new < old) {
+    if (large_class(buf.len) == null and new < old) {
         _ = linux.munmap(@ptrFromInt(@intFromPtr(buf.ptr) + new), old - new);
         return true;
     }
@@ -99,8 +120,8 @@ fn remap(ctx: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, ra: u
     if (class_of(buf.len, alignment) != null or class_of(new_len, alignment) != null) {
         return if (resize(ctx, buf, alignment, new_len, ra)) buf.ptr else null;
     }
-    const old = large_len(buf.len);
-    const new = large_len(new_len);
+    const old = block_len(buf.len);
+    const new = block_len(new_len);
     if (old == new) return buf.ptr;
     const r = linux.mremap(buf.ptr, old, new, .{ .MAYMOVE = true }, null);
     if (linux.errno(r) != .SUCCESS) return null;
@@ -112,6 +133,12 @@ fn free(_: *anyopaque, buf: []u8, alignment: Alignment, _: usize) void {
         const node: *usize = @ptrCast(@alignCast(buf.ptr));
         node.* = frees[c];
         frees[c] = @intFromPtr(buf.ptr);
+        return;
+    }
+    if (large_class(buf.len)) |c| {
+        const node: *usize = @ptrCast(@alignCast(buf.ptr));
+        node.* = large_frees[c];
+        large_frees[c] = @intFromPtr(buf.ptr);
         return;
     }
     _ = linux.munmap(buf.ptr, large_len(buf.len));
