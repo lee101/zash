@@ -271,9 +271,8 @@ fn regexOptions(cfg: Config, utf8: bool) regex.Options {
 }
 
 fn checkSupported(argv: []const []const u8, env: ?*const common.EnvView) bool {
-    var buf: [1 << 16]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const a = fba.allocator();
+    var sfa = std.heap.stackFallback(1 << 17, std.heap.page_allocator);
+    const a = sfa.get();
     var pr = parseArgs(a, argv, null, true) catch return false;
     if (!pr.ok) return false;
     const cfg = pr.cfg;
@@ -299,7 +298,7 @@ fn checkSupported(argv: []const []const u8, env: ?*const common.EnvView) bool {
     }
     if (pats.items.len == 0 and pr.pattern_files.items.len == 0) return false;
     if (pats.items.len > 0) {
-        const re = regex.Regex.compile(std.heap.page_allocator, pats.items, regexOptions(cfg, utf8)) catch return false;
+        const re = regex.Regex.compile(a, pats.items, regexOptions(cfg, utf8)) catch return false;
         defer re.deinit();
         if (cfg.word and re.can_be_empty) return false;
         if (utf8 and re.sensitive) return false;
