@@ -6,38 +6,38 @@ Harness: `bench/run.sh` (agent corpus, 630 entries, hyperfine `-N`, 20 runs, 3 w
 
 | category | entries | before geomean | after geomean | after median | zash median ms (before / after) |
 |---|---|---|---|---|---|
-| search | 110 | 1.12x | 1.45x | 1.21x | 4.80 / 4.10 |
-| text-pipeline | 116 | 1.33x | 2.33x | 2.45x | 1.41 / 0.75 |
-| fs-listing | 110 | 1.12x | 1.88x | 1.65x | 1.58 / 1.09 |
-| control-flow | 190 | 1.42x | 2.51x | 2.51x | 1.39 / 0.73 |
-| git | 70 | 1.05x | 1.27x | 1.27x | 2.70 / 2.13 |
-| startup | 34 | 1.21x | 2.79x | 2.76x | 0.81 / 0.34 |
-| all | 630 | 1.24x | 1.99x | | |
+| search | 110 | 1.12x | 1.62x | 1.23x | 4.80 / 3.63 |
+| text-pipeline | 116 | 1.33x | 2.37x | 2.70x | 1.41 / 0.65 |
+| fs-listing | 110 | 1.12x | 1.88x | 1.67x | 1.58 / 1.08 |
+| control-flow | 190 | 1.42x | 2.56x | 2.53x | 1.39 / 0.70 |
+| git | 70 | 1.05x | 1.28x | 1.26x | 2.70 / 2.09 |
+| startup | 34 | 1.21x | 2.76x | 2.69x | 0.81 / 0.35 |
+| all | 630 | 1.24x | 2.05x | | |
 
-The 14 corpus entries that need `logs/huge.log` (`--big 50m,500m`) go from 0.85x to 2.50x geomean; the old figure includes `grep -c` entries where GNU grep stops at the first match because stdout is /dev/null.
+The 14 corpus entries that need `logs/huge.log` (`--big 50m,500m`) go from 0.85x to 2.75x geomean; the old figure includes `grep -c` entries where GNU grep stops at the first match because stdout is /dev/null.
 
 Startup (`zash -c true` with a small environment): 0.77ms to 0.30ms, bash 0.86ms.
 
 ## Stress (200MB log, `bench/stress/corpus`)
 
-Geomean 3.41x; all 14 entries output-equal and faster.
+Geomean 3.97x; all 14 entries output-equal and faster.
 
 | entry | bash ms | zash ms | speedup |
 |---|---|---|---|
-| `cat logs/big.log \| grep -m 2 ERROR` | 73.29 | 0.83 | 87.9x |
-| `cat logs/big.log \| head -n 3` | 4.90 | 0.51 | 9.5x |
-| `cut -d' ' -f2 logs/big.log \| head -n 3` | 2.32 | 0.73 | 3.2x |
-| `head -n 5 logs/big.log \| wc -l` | 1.74 | 0.57 | 3.1x |
-| `tail -n 2 logs/big.log` | 1.34 | 0.46 | 2.9x |
-| `tr a-z A-Z < logs/big.log \| head -n 2` | 2.06 | 0.73 | 2.8x |
-| `grep -c ERROR logs/big.log > /dev/null` | 1.92 | 0.72 | 2.7x |
-| `grep -m 1 ERROR logs/big.log \| cut -c1-20` | 1.94 | 0.80 | 2.4x |
-| `grep -m 3 ERROR logs/big.log` | 1.58 | 0.69 | 2.3x |
-| `grep ERROR logs/big.log \| head -n 5` | 1.98 | 0.87 | 2.3x |
-| `cat logs/big.log \| tr -s ' ' \| cut -d' ' -f1,2 \| head -n 4` | 2.22 | 1.04 | 2.1x |
-| `yes \| head -n 1000000 \| wc -l` | 3.54 | 1.72 | 2.1x |
-| `grep WARN logs/big.log \| grep -m 3 timeout` | 100.14 | 58.31 | 1.7x |
-| `grep ERROR logs/big.log \| cut -d' ' -f1 \| head -n 3` | 2.20 | 1.30 | 1.7x |
+| `cat logs/big.log \| grep -m 2 ERROR` | 70.00 | 0.68 | 103.7x |
+| `cat logs/big.log \| head -n 3` | 4.84 | 0.50 | 9.8x |
+| `grep -c ERROR logs/big.log > /dev/null` | 1.87 | 0.47 | 4.0x |
+| `head -n 5 logs/big.log \| wc -l` | 1.86 | 0.49 | 3.8x |
+| `cut -d' ' -f2 logs/big.log \| head -n 3` | 2.23 | 0.61 | 3.6x |
+| `grep -m 3 ERROR logs/big.log` | 1.59 | 0.45 | 3.6x |
+| `grep -m 1 ERROR logs/big.log \| cut -c1-20` | 1.93 | 0.62 | 3.1x |
+| `grep ERROR logs/big.log \| head -n 5` | 1.99 | 0.68 | 2.9x |
+| `tr a-z A-Z < logs/big.log \| head -n 2` | 2.00 | 0.71 | 2.8x |
+| `tail -n 2 logs/big.log` | 1.36 | 0.50 | 2.7x |
+| `yes \| head -n 1000000 \| wc -l` | 3.73 | 1.61 | 2.3x |
+| `cat logs/big.log \| tr -s ' ' \| cut -d' ' -f1,2 \| head -n 4` | 2.28 | 1.02 | 2.2x |
+| `grep ERROR logs/big.log \| cut -d' ' -f1 \| head -n 3` | 2.12 | 1.08 | 2.0x |
+| `grep WARN logs/big.log \| grep -m 3 timeout` | 99.91 | 58.29 | 1.7x |
 
 Full-scan throughput entries (`bench/stress/throughput`, informational): `wc -l < f` 2.9x, `cat f | wc -l` 2.8x, `head -c 300000000 /dev/zero | wc -c` 5.8x, `tr -d x < f | wc -c` 1.9x, `cut | sort | uniq -c` 1.6x, `seq 1 3000000 | tail -n 1` 1.04x, `grep -o 'status=[0-9]*' f | sort | uniq -c` 0.99x, `grep -v INFO f | wc -l` 0.84x. Fused stages share one thread, so a bash pipeline whose stages are both CPU bound can match or beat it on a multicore machine.
 
