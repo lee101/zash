@@ -8,4 +8,3 @@ errors/syntax-unexpected-eof-heredoc
 heredoc/eof-unterminated
 jobs/coproc
 set-options/x-arith
-special-vars/status-signal
