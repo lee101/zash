@@ -12,4 +12,5 @@ test {
     _ = @import("vars.zig");
     _ = @import("pattern.zig");
     _ = @import("builtins.zig");
+    _ = @import("tests.zig");
 }

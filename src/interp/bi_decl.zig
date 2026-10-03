@@ -139,8 +139,7 @@ pub fn print_declare(sh: *Shell, v: *Var, out: *std.ArrayList(u8)) Err!void {
     if (attrs.len == 0) try out.append(a, '-') else try out.appendSlice(a, attrs);
     try out.append(a, ' ');
     try out.appendSlice(a, v.name);
-    if (!v.array_set and ((v.value == .indexed and v.value.indexed.items.items.len == 0) or (v.value == .assoc and v.value.assoc.map.count() == 0))) {
-    } else if (v.special != .none and v.value == .none) {
+    if (!v.array_set and ((v.value == .indexed and v.value.indexed.items.items.len == 0) or (v.value == .assoc and v.value.assoc.map.count() == 0))) {} else if (v.special != .none and v.value == .none) {
         if (sh.scalar_of(v)) |s| {
             try out.appendSlice(a, "=\"");
             try escape_dq(a, out, s);
