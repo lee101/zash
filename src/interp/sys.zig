@@ -150,7 +150,11 @@ pub fn get_signal(sig: c_int) usize {
 }
 
 pub fn msg_for(e: c_int) []const u8 {
-    return std.mem.span(strerror(e));
+    return @import("msgs.zig").errno_msg(e) orelse std.mem.span(strerror(e));
+}
+
+pub fn signal_text(sig: c_int) []const u8 {
+    return @import("msgs.zig").signal_msg(sig) orelse std.mem.span(strsignal(sig));
 }
 
 pub fn write_all(fd: c_int, bytes: []const u8) bool {

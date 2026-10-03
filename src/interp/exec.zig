@@ -465,7 +465,7 @@ fn flush_sig_report(sh: *Shell) void {
     if (st == 0) return;
     sh.pending_sig = 0;
     var buf: [128]u8 = undefined;
-    const txt = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ std.mem.span(sys.strsignal(sys.wtermsig(st))), if (st & 0x80 != 0) " (core dumped)" else "" }) catch "";
+    const txt = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ sys.signal_text(sys.wtermsig(st)), if (st & 0x80 != 0) " (core dumped)" else "" }) catch "";
     _ = sys.write_all(2, txt);
 }
 
