@@ -24,6 +24,7 @@ ap.add_argument("--timeout", type=int, default=120)
 ap.add_argument("--big", default=os.environ.get("FIXTURE_BIG", ""), help="e.g. 50m,500m: build big logs, enable entries that need them")
 ap.add_argument("--gen", default=os.path.join(HERE, "fixture/gen.py"), help="fixture generator script (DEST argument)")
 ap.add_argument("--min-speedup", type=float, default=0.0, help="exit 1 if any verified entry (outside category throughput) is slower than this ratio")
+ap.add_argument("--min-category-geomean", type=float, default=0.0, help="exit 1 if any category geomean is below this")
 ap.add_argument("--min-geomean", type=float, default=0.0, help="exit 1 if the geomean speedup is below this")
 ap.add_argument("--quick", action="store_true", help="runs=5 warmup=1 startup-runs=30")
 ap.add_argument("-v", "--verbose", action="store_true")
@@ -215,7 +216,10 @@ print(f"\nwrote {a.out}/results.md and results.json", file=sys.stderr)
 slow = [r for r in ok if r["category"] != "throughput" and a.min_speedup and r["speedup"] < a.min_speedup]
 for r in slow:
     print(f"SLOW {r['name']}  x{r['speedup']:.2f} < {a.min_speedup}", file=sys.stderr)
+low_cat = [c for c, v in cats.items() if a.min_category_geomean and (v["geomean_speedup"] or 0) < a.min_category_geomean]
+for c in low_cat:
+    print(f"category {c} geomean x{cats[c]['geomean_speedup'] or 0:.2f} < {a.min_category_geomean}", file=sys.stderr)
 low_gm = bool(a.min_geomean and (summary["geomean_speedup"] or 0) < a.min_geomean)
 if low_gm:
     print(f"geomean x{summary['geomean_speedup']:.2f} < {a.min_geomean}", file=sys.stderr)
-sys.exit(1 if bad or nondet and a.min_speedup or slow or low_gm else 0)
+sys.exit(1 if bad or nondet and a.min_speedup or slow or low_gm or low_cat else 0)
