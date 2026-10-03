@@ -63,6 +63,15 @@ fn redir_ok(r: ast.Redirect) bool {
     return word_pure(r.target);
 }
 
+const pure_builtins = [_][]const u8{ "echo", "printf", "pwd", "true", "false", ":", "test", "[" };
+
+pub fn pure_builtin(name: []const u8) bool {
+    for (pure_builtins) |n| {
+        if (std.mem.eql(u8, n, name)) return true;
+    }
+    return false;
+}
+
 pub fn classify(sh: *Shell, p: ast.Pipeline) Strategy {
     return if (fusable(sh, p, 2)) .fused else .general;
 }
@@ -76,7 +85,7 @@ pub fn fusable(sh: *Shell, p: ast.Pipeline, min: usize) bool {
         const s = c.body.simple;
         if (s.assigns.len != 0 or s.words.len == 0) return false;
         const name = plain_lit(s.words[0]) orelse return false;
-        if (builtins.is_builtin(name)) return false;
+        if (builtins.is_builtin(name) and !(pure_builtin(name) and c.redirs.len == 0 and !sh.opt(.xtrace))) return false;
         for (s.words) |w| if (!word_pure(w)) return false;
         for (c.redirs) |r| if (!redir_ok(r)) return false;
     }

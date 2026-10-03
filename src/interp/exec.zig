@@ -2042,8 +2042,6 @@ pub fn cmd_subst(sh: *Shell, cs: *const ast.CmdSubst) Err![]const u8 {
     return strip_nl(buf.items);
 }
 
-const pure_builtins = [_][]const u8{ "echo", "printf", "pwd", "true", "false", ":", "test", "[" };
-
 fn cmdsub_fast(sh: *Shell, cs: *const ast.CmdSubst) Err!?[]const u8 {
     if (cs.body.items.len != 1) return null;
     const it = cs.body.items[0];
@@ -2059,11 +2057,7 @@ fn cmdsub_fast(sh: *Shell, cs: *const ast.CmdSubst) Err!?[]const u8 {
         const s = c.body.simple;
         if (s.assigns.len != 0 or s.words.len == 0 or c.redirs.len != 0) return null;
         const name = plain_lit(s.words[0]) orelse return null;
-        var is_pure = false;
-        for (pure_builtins) |n| {
-            if (std.mem.eql(u8, n, name)) is_pure = true;
-        }
-        if (is_pure) {
+        if (plan.pure_builtin(name)) {
             if (sh.aliases.count() > 0 or sh.funcs.contains(name)) return null;
             for (s.words) |w| if (!plan.word_pure(w)) return null;
             var list: std.ArrayList([]const u8) = .empty;

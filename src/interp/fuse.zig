@@ -8,6 +8,7 @@ const registry = @import("../utils/registry.zig");
 const builtins = @import("builtins.zig");
 const pspawn = @import("pspawn.zig");
 const exec = @import("exec.zig");
+const plan = @import("plan.zig");
 const common = @import("../utils/common.zig");
 const Shell = shell.Shell;
 const Err = shell.Err;
@@ -423,6 +424,8 @@ const Stage = struct {
     status: u8 = 0,
     failed_open: bool = false,
     elided: bool = false,
+    pre: ?[]const u8 = null,
+    builtin: bool = false,
     pid: c_int = -1,
     sh: *Shell,
     group: *Group,
@@ -435,6 +438,11 @@ const Stage = struct {
 };
 
 fn stage_main(st: *Stage) void {
+    if (st.pre) |bytes| {
+        st.sink_out.writer().writeAll(bytes) catch {};
+        finish_stage(st);
+        return;
+    }
     if (st.failed_open) {
         st.status = 1;
         finish_stage(st);
@@ -669,10 +677,20 @@ pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
         try expand.words_fields(sh, s.words, &list);
         if (list.items.len == 0) return null;
         const name = list.items[0];
-        if (sh.funcs.contains(name) or builtins.is_builtin(name)) return null;
+        if (sh.funcs.contains(name)) return null;
+        if (builtins.is_builtin(name)) {
+            if (!plan.pure_builtin(name) or c.redirs.len != 0) return null;
+            if (list.items.len > 1 and (std.mem.eql(u8, list.items[1], "--help") or (std.mem.eql(u8, name, "printf") and std.mem.eql(u8, list.items[1], "-v")))) return null;
+        }
         if (sh.pending_funcs.count() > 0 and sh.pending_funcs.contains(name)) return null;
         if (sh.aliases.count() > 0 and sh.aliases.contains(name)) return null;
         var st: Stage = .{ .argv = list.items, .sh = sh, .group = undefined, .env = undefined, .cwd = undefined };
+        if (builtins.is_builtin(name)) {
+            st.builtin = true;
+            util_count += 1;
+            stages[i] = st;
+            continue;
+        }
         if (registry.lookup(name)) |rf| {
             if (registry.supports(list.items) and exec.util_ok_stage(sh, name, c.redirs, i == 0)) {
                 st.run_fn = rf;
@@ -787,7 +805,7 @@ pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
         st.env = &env;
         st.cwd = cwd;
         if (st.elided) continue;
-        if (st.kind == .util) st.in_buf = try a.alloc(u8, 65536);
+        if (st.kind == .util and !st.builtin) st.in_buf = try a.alloc(u8, 65536);
         if (i == 0) {
             st.src = .{ .fd = 0 };
         } else if (stages[i - 1].elided) {
@@ -864,6 +882,20 @@ pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
             const ps = pipe_sinks[i];
             if (ps.close_fd >= 0 and fd1 != ps and fd2 != ps) b.close_sink_pipe(ps);
         }
+    }
+
+    for (stages) |*st| {
+        if (!st.builtin) continue;
+        var buf: std.ArrayList(u8) = .empty;
+        const prev = sh.capture;
+        sh.capture = &buf;
+        defer sh.capture = prev;
+        const bi = builtins.lookup(st.argv[0]).?;
+        st.status = bi.run(sh, st.argv) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            else => sh.status,
+        };
+        st.pre = buf.items;
     }
 
     if (sh.opt(.xtrace)) {
