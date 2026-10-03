@@ -4,7 +4,7 @@ import argparse, json, math, os, re, shlex, shutil, statistics, subprocess, sys,
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-CATS = ["search", "text-pipeline", "fs-listing", "control-flow", "git", "startup"]
+CATS = ["search", "text-pipeline", "fs-listing", "control-flow", "git", "stress", "throughput", "startup"]
 
 ap = argparse.ArgumentParser(prog="run.sh", description="verify zash output against bash, then time both")
 ap.add_argument("--zash", default=os.environ.get("ZASH", os.path.join(ROOT, "zig-out/bin/zash")))
@@ -22,6 +22,9 @@ ap.add_argument("--no-startup", action="store_true")
 ap.add_argument("--no-hyperfine", action="store_true", help="use the built-in timing loop")
 ap.add_argument("--timeout", type=int, default=120)
 ap.add_argument("--big", default=os.environ.get("FIXTURE_BIG", ""), help="e.g. 50m,500m: build big logs, enable entries that need them")
+ap.add_argument("--gen", default=os.path.join(HERE, "fixture/gen.py"), help="fixture generator script (DEST argument)")
+ap.add_argument("--min-speedup", type=float, default=0.0, help="exit 1 if any verified entry (outside category throughput) is slower than this ratio")
+ap.add_argument("--min-geomean", type=float, default=0.0, help="exit 1 if the geomean speedup is below this")
 ap.add_argument("--quick", action="store_true", help="runs=5 warmup=1 startup-runs=30")
 ap.add_argument("-v", "--verbose", action="store_true")
 a = ap.parse_args()
@@ -40,7 +43,7 @@ env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent-ho
 os.environ.clear(); os.environ.update(env)
 
 gen_env = dict(os.environ, FIXTURE_BIG=a.big, PATH=env["PATH"])
-r = subprocess.run([sys.executable, os.path.join(HERE, "fixture/gen.py"), a.fixture], env=dict(gen_env, HOME=os.path.expanduser("~")), capture_output=True, text=True)
+r = subprocess.run([sys.executable, a.gen, a.fixture], env=dict(gen_env, HOME=os.path.expanduser("~")), capture_output=True, text=True)
 if r.returncode: sys.exit("fixture generation failed:\n" + r.stderr)
 fixture = os.path.realpath(a.fixture)
 os.chdir(fixture)
@@ -209,4 +212,10 @@ if ok:
 open(os.path.join(a.out, "results.md"), "w").write("\n".join(md) + "\n")
 print("\n".join(md[:14 + len(cats)]))
 print(f"\nwrote {a.out}/results.md and results.json", file=sys.stderr)
-sys.exit(1 if bad else 0)
+slow = [r for r in ok if r["category"] != "throughput" and a.min_speedup and r["speedup"] < a.min_speedup]
+for r in slow:
+    print(f"SLOW {r['name']}  x{r['speedup']:.2f} < {a.min_speedup}", file=sys.stderr)
+low_gm = bool(a.min_geomean and (summary["geomean_speedup"] or 0) < a.min_geomean)
+if low_gm:
+    print(f"geomean x{summary['geomean_speedup']:.2f} < {a.min_geomean}", file=sys.stderr)
+sys.exit(1 if bad or nondet and a.min_speedup or slow or low_gm else 0)
