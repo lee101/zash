@@ -1488,6 +1488,19 @@ pub fn dispatch_ex(sh: *Shell, argv: []const []const u8, decl: []const DeclItem,
     return run_external(sh, argv, redirs, final);
 }
 
+pub fn util_ok_stage(sh: *Shell, name: []const u8, redirs: []const ast.Redirect, first: bool) bool {
+    if (!first and redirs.len == 0) return util_path_ok(sh, name);
+    return util_ok(sh, name, redirs);
+}
+
+fn util_path_ok(sh: *Shell, name: []const u8) bool {
+    const r = resolve(sh, name, true) catch return false;
+    switch (r) {
+        .found => |p| return std.mem.startsWith(u8, p, "/usr/bin/") or std.mem.startsWith(u8, p, "/bin/"),
+        else => return false,
+    }
+}
+
 fn util_ok(sh: *Shell, name: []const u8, redirs: []const ast.Redirect) bool {
     if (std.mem.eql(u8, name, "head")) {
         if (sys.stat_fd(0)) |st| {
@@ -1592,7 +1605,7 @@ pub fn call_function(sh: *Shell, f: *const shell.Func, args: []const []const u8)
     return status;
 }
 
-fn make_argv_z(sh: *Shell, argv: []const []const u8) Err![*:null]const ?[*:0]const u8 {
+pub fn make_argv_z(sh: *Shell, argv: []const []const u8) Err![*:null]const ?[*:0]const u8 {
     const a = sh.sa;
     const arr = try a.alloc(?[*:0]const u8, argv.len + 1);
     for (argv, 0..) |s, i| {

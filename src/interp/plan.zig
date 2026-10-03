@@ -66,7 +66,6 @@ pub fn classify(sh: *Shell, p: ast.Pipeline) Strategy {
         const s = c.body.simple;
         if (s.assigns.len != 0 or s.words.len == 0) return .general;
         const name = plain_lit(s.words[0]) orelse return .general;
-        if (registry.lookup(name) == null) return .general;
         if (builtins.is_builtin(name)) return .general;
         for (s.words) |w| if (!word_pure(w)) return .general;
         for (c.redirs) |r| if (!redir_ok(r)) return .general;

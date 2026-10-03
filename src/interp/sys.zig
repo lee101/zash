@@ -109,6 +109,7 @@ pub extern "c" fn uname(buf: *[390]u8) c_int;
 
 pub const PollFd = extern struct { fd: c_int, events: c_short, revents: c_short };
 pub const POLLIN: c_short = 1;
+pub const POLLOUT: c_short = 4;
 pub const RLimit = extern struct { cur: u64, max: u64 };
 pub const Tms = extern struct { utime: c_long, stime: c_long, cutime: c_long, cstime: c_long };
 pub const Timespec = extern struct { sec: i64, nsec: i64 };
