@@ -16,14 +16,20 @@ fn plain_lit(w: ast.Word) ?[]const u8 {
     return null;
 }
 
+fn subshell_var(name: []const u8) bool {
+    return std.mem.eql(u8, name, "BASH_SUBSHELL") or std.mem.eql(u8, name, "BASHPID") or std.mem.eql(u8, name, "BASH_COMMAND");
+}
+
 fn part_pure(p: ast.Part) bool {
     switch (p) {
-        .lit, .quoted, .ansi_c, .variable, .tilde => return true,
+        .variable => |n| return !subshell_var(n),
+        .lit, .quoted, .ansi_c, .tilde => return true,
         .dquote => |inner| {
             for (inner) |ip| if (!part_pure(ip)) return false;
             return true;
         },
         .param => |pe| {
+            if (pe.indirect or subshell_var(pe.name)) return false;
             switch (pe.op) {
                 .none, .prefix_names, .transform => return true,
                 .trim => |t| return word_pure(t.pattern),
@@ -39,7 +45,7 @@ fn part_pure(p: ast.Part) bool {
     }
 }
 
-fn word_pure(w: ast.Word) bool {
+pub fn word_pure(w: ast.Word) bool {
     for (w.parts) |p| if (!part_pure(p)) return false;
     return true;
 }
@@ -58,17 +64,21 @@ fn redir_ok(r: ast.Redirect) bool {
 }
 
 pub fn classify(sh: *Shell, p: ast.Pipeline) Strategy {
-    if (!fuse.supported) return .general;
-    if (p.commands.len < 2 or p.commands.len > 16) return .general;
-    if (sh.trap_debug.kind == .cmd or sh.opt(.verbose)) return .general;
+    return if (fusable(sh, p, 2)) .fused else .general;
+}
+
+pub fn fusable(sh: *Shell, p: ast.Pipeline, min: usize) bool {
+    if (!fuse.supported) return false;
+    if (p.commands.len < min or p.commands.len > 16) return false;
+    if (sh.trap_debug.kind == .cmd or sh.opt(.verbose)) return false;
     for (p.commands) |c| {
-        if (c.body != .simple) return .general;
+        if (c.body != .simple) return false;
         const s = c.body.simple;
-        if (s.assigns.len != 0 or s.words.len == 0) return .general;
-        const name = plain_lit(s.words[0]) orelse return .general;
-        if (builtins.is_builtin(name)) return .general;
-        for (s.words) |w| if (!word_pure(w)) return .general;
-        for (c.redirs) |r| if (!redir_ok(r)) return .general;
+        if (s.assigns.len != 0 or s.words.len == 0) return false;
+        const name = plain_lit(s.words[0]) orelse return false;
+        if (builtins.is_builtin(name)) return false;
+        for (s.words) |w| if (!word_pure(w)) return false;
+        for (c.redirs) |r| if (!redir_ok(r)) return false;
     }
-    return .fused;
+    return true;
 }

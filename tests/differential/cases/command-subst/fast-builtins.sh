@@ -1,0 +1,17 @@
+x=$(echo hi); echo "[$x] $?"
+x=$(printf 'a\nb\n\n'); echo "[$x]"
+x=$(pwd); echo "${x##*/}"
+x=$(test -f nonexistent; echo $?); echo $x
+x=$(true); echo "[$x] $?"; x=$(false); echo "[$x] $?"
+y=5; echo "$(echo $y)"; echo "$(echo "${y:-z}")"
+x=$(echo a; echo b); echo "$x"
+x=$(printf '%s' "no newline"); echo "[$x]"
+x=$(echo hi >&2); echo "[$x]"
+f() { echo "in f"; }; x=$(f); echo "[$x]"
+x=$(echo "$(echo nested)"); echo "$x"
+x=$(printf -v zz '%s' q; echo "[$zz]"); echo "[$x] [$zz]"
+x=$(echo $BASHPID | wc -c); [ "$x" -gt 1 ] && echo ok
+x=$(echo ${unset_var:=assigned}); echo "[$x] [${unset_var-unset}]"
+x=$([ 1 -eq 1 ]); echo "rc=$? [$x]"
+x=$(echo -n a; echo -n b); echo "[$x]"
+alias ee='echo aliased'; x=$(ee); echo "[$x]"

@@ -265,6 +265,31 @@ const FdReader = struct {
     }
 };
 
+const MemWriter = struct {
+    list: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    w: Io.Writer,
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const self: *MemWriter = @alignCast(@fieldParentPtr("w", w));
+        self.list.appendSlice(self.a, w.buffer[0..w.end]) catch return error.WriteFailed;
+        w.end = 0;
+        var n: usize = 0;
+        if (data.len == 0) return 0;
+        for (data[0 .. data.len - 1]) |s| {
+            self.list.appendSlice(self.a, s) catch return error.WriteFailed;
+            n += s.len;
+        }
+        const last = data[data.len - 1];
+        var i: usize = 0;
+        while (i < splat) : (i += 1) {
+            self.list.appendSlice(self.a, last) catch return error.WriteFailed;
+            n += last.len;
+        }
+        return n;
+    }
+};
+
 const FdWriter = struct {
     fd: c_int,
     group: *Group,
@@ -327,14 +352,18 @@ const Sink = struct {
     closed: bool = false,
     inited: bool = false,
     a: std.mem.Allocator,
+    gpa: std.mem.Allocator = undefined,
     io: Io,
     group: *Group,
     file_w: ?*Io.File.Writer = null,
     ring_w: ?*RingWriter = null,
     fd_w: ?*FdWriter = null,
+    mem: ?*std.ArrayList(u8) = null,
+    mem_w: ?*MemWriter = null,
 
     fn writer(self: *Sink) *Io.Writer {
         if (!self.inited) self.init_writer() catch @panic("oom");
+        if (self.mem_w) |mw| return &mw.w;
         if (self.ring_w) |rw| return &rw.w;
         if (self.fd_w) |fw| return &fw.w;
         return &self.file_w.?.interface;
@@ -342,7 +371,14 @@ const Sink = struct {
 
     fn init_writer(self: *Sink) !void {
         self.inited = true;
-        if (self.ring) |ring| {
+        if (self.mem) |list| {
+            const mw = try self.a.create(MemWriter);
+            mw.* = .{ .list = list, .a = self.a, .w = .{
+                .vtable = &.{ .drain = MemWriter.drain },
+                .buffer = try self.a.alloc(u8, 4096),
+            } };
+            self.mem_w = mw;
+        } else if (self.ring) |ring| {
             const rw = try self.a.create(RingWriter);
             rw.* = .{ .ring = ring, .group = self.group, .w = .{
                 .vtable = &.{ .drain = RingWriter.drain },
@@ -508,6 +544,12 @@ const Build = struct {
         return s;
     }
 
+    fn sink_mem(self: *Build, list: *std.ArrayList(u8)) Err!*Sink {
+        const s = try self.a.create(Sink);
+        s.* = .{ .mem = list, .a = self.a, .gpa = self.sh.gpa, .io = self.sh.io, .group = self.group };
+        return s;
+    }
+
     fn sink_ring(self: *Build, ring: *Ring) Err!*Sink {
         const s = try self.a.create(Sink);
         s.* = .{ .ring = ring, .a = self.a, .io = self.sh.io, .group = self.group };
@@ -614,7 +656,7 @@ fn poll_waiters(fibers: []Fiber, fds: []sys.PollFd) void {
     _ = sys.poll(fds.ptr, k, -1);
 }
 
-pub fn run(sh: *Shell, p: ast.Pipeline) Err!?u8 {
+pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
     if (!supported) return null;
     const a = sh.sa;
     const n = p.commands.len;
@@ -650,11 +692,13 @@ pub fn run(sh: *Shell, p: ast.Pipeline) Err!?u8 {
         stages[i] = st;
     }
 
+    if (cap != null and stages[n - 1].kind != .util) return null;
+
     var group: Group = .{};
     var b: Build = .{ .sh = sh, .a = a, .group = &group };
 
     var cat_fd: c_int = -1;
-    if (stages[0].kind == .util and stages[0].argv.len == 2 and std.mem.eql(u8, stages[0].argv[0], "cat") and p.commands[0].redirs.len == 0 and
+    if (n >= 2 and stages[0].kind == .util and stages[0].argv.len == 2 and std.mem.eql(u8, stages[0].argv[0], "cat") and p.commands[0].redirs.len == 0 and
         !has_stdin_redir(p.commands[1].redirs) and !(i_pipe_stderr(p, 0)))
     {
         const f = stages[0].argv[1];
@@ -676,7 +720,7 @@ pub fn run(sh: *Shell, p: ast.Pipeline) Err!?u8 {
         try b.opened.append(a, cat_fd);
     }
 
-    const stdout_default = try b.sink(1, false);
+    const stdout_default = if (cap) |c| try b.sink_mem(c) else try b.sink(1, false);
     const stderr_default = try b.sink(2, false);
 
     const edges = try a.alloc(Edge, n - 1);
@@ -893,7 +937,7 @@ pub fn run(sh: *Shell, p: ast.Pipeline) Err!?u8 {
         if (st.kind == .ext and st.pid > 0) st.status = exec.wait_pid(sh, st.pid);
         sts[i] = st.status;
     }
-    exec.set_pipestatus_pub(sh, sts);
+    if (cap == null) exec.set_pipestatus_pub(sh, sts);
     var result = sts[n - 1];
     if (sh.opt(.pipefail)) {
         var k = n;

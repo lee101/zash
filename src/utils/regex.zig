@@ -884,6 +884,7 @@ pub const Regex = struct {
     literal_only: ?[]const u8,
     fwd: Dfa,
     anc: Dfa,
+    vm: ?Vm,
 
     pub fn compile(alloc: Allocator, patterns: []const []const u8, opts: Options) CompileError!*Regex {
         const self = try alloc.create(Regex);
@@ -947,6 +948,7 @@ pub const Regex = struct {
         self.fwd = try Dfa.init(alloc, self, true);
         errdefer self.fwd.deinit();
         self.anc = try Dfa.init(alloc, self, false);
+        self.vm = null;
         return self;
     }
 
@@ -954,6 +956,7 @@ pub const Regex = struct {
         const alloc = self.alloc;
         self.fwd.deinit();
         self.anc.deinit();
+        if (self.vm) |*v| v.deinit();
         self.nfa.deinit(alloc);
         self.arena.deinit();
         alloc.destroy(self);
@@ -1143,6 +1146,15 @@ pub const Regex = struct {
         return self.anc.longest(hay, at, ends);
     }
 
+    pub fn pike(self: *Regex, hay: []const u8, from: usize, caps: []usize) bool {
+        if (self.vm == null) self.vm = Vm.init(self) catch return false;
+        return self.vm.?.search(hay, from, caps) catch false;
+    }
+
+    pub fn ncaps(self: *const Regex) usize {
+        return (@min(self.ngroups, max_caps - 1) + 1) * 2;
+    }
+
     pub fn find(self: *Regex, hay: []const u8, from: usize) ?Match {
         var s = from;
         while (s <= hay.len) : (s += 1) {
@@ -1153,6 +1165,188 @@ pub const Regex = struct {
             if (self.anc.longest(hay, s, null)) |e| return .{ .start = s, .end = e };
         }
         return null;
+    }
+};
+
+pub const max_caps = 20;
+
+const Vm = struct {
+    re: *Regex,
+    ncap: usize,
+    cl_pc: []u32,
+    nl_pc: []u32,
+    cl_caps: []usize,
+    nl_caps: []usize,
+    cl_n: usize = 0,
+    nl_n: usize = 0,
+    mark: []u32,
+    gen: u32 = 0,
+    cur: [max_caps * 2]usize = undefined,
+    stack: std.ArrayList(Frame) = .empty,
+
+    const Frame = struct { pc: u32, restore_slot: u32 = std.math.maxInt(u32), restore_val: usize = 0 };
+    const none = std.math.maxInt(usize);
+
+    fn init(re: *Regex) !Vm {
+        const n = re.nfa.states.items.len;
+        const ncap = (@min(re.ngroups, max_caps - 1) + 1) * 2;
+        return .{
+            .re = re,
+            .ncap = ncap,
+            .cl_pc = try re.alloc.alloc(u32, n),
+            .nl_pc = try re.alloc.alloc(u32, n),
+            .cl_caps = try re.alloc.alloc(usize, n * ncap),
+            .nl_caps = try re.alloc.alloc(usize, n * ncap),
+            .mark = try re.alloc.alloc(u32, n),
+        };
+    }
+
+    fn deinit(self: *Vm) void {
+        const a = self.re.alloc;
+        a.free(self.cl_pc);
+        a.free(self.nl_pc);
+        a.free(self.cl_caps);
+        a.free(self.nl_caps);
+        a.free(self.mark);
+        self.stack.deinit(a);
+    }
+
+    fn wordAt(self: *const Vm, hay: []const u8, i: usize) bool {
+        if (i >= hay.len) return false;
+        const c = hay[i];
+        if (c < 0x80 or self.re.opts.unicode == .none) return isWordByte(c);
+        const n = std.unicode.utf8ByteSequenceLength(c) catch return false;
+        if (i + n > hay.len) return false;
+        const cp = std.unicode.utf8Decode(hay[i..][0..n]) catch return false;
+        const tbl = ucp.classTable(if (self.re.opts.unicode == .rust) .rust else .glibc, "word").?;
+        return ucp.inTable(tbl, cp);
+    }
+
+    fn wordBefore(self: *const Vm, hay: []const u8, i: usize) bool {
+        if (i == 0) return false;
+        var k = i - 1;
+        if (self.re.opts.unicode != .none) {
+            var back: usize = 0;
+            while (k > 0 and back < 3 and hay[k] & 0xc0 == 0x80) : (back += 1) k -= 1;
+        }
+        return self.wordAt(hay, k);
+    }
+
+    fn holds(self: *const Vm, a: Assert, hay: []const u8, i: usize) bool {
+        const lm = self.re.opts.line_mode;
+        return switch (a) {
+            .bol => i == 0 or (lm and hay[i - 1] == '\n'),
+            .eol => i == hay.len or (lm and hay[i] == '\n'),
+            .word_b => self.wordBefore(hay, i) != self.wordAt(hay, i),
+            .nword_b => self.wordBefore(hay, i) == self.wordAt(hay, i),
+            .word_start => !self.wordBefore(hay, i) and self.wordAt(hay, i),
+            .word_end => self.wordBefore(hay, i) and !self.wordAt(hay, i),
+        };
+    }
+
+    fn nextGen(self: *Vm) void {
+        self.gen +%= 1;
+        if (self.gen == 0) {
+            @memset(self.mark, 0);
+            self.gen = 1;
+        }
+    }
+
+    fn add(self: *Vm, to_next: bool, pc0: u32, hay: []const u8, pos: usize) !void {
+        const a = self.re.alloc;
+        const nfa = &self.re.nfa;
+        try self.stack.append(a, .{ .pc = pc0 });
+        while (self.stack.pop()) |fr| {
+            if (fr.restore_slot != std.math.maxInt(u32)) {
+                self.cur[fr.restore_slot] = fr.restore_val;
+                continue;
+            }
+            const pc = fr.pc;
+            if (self.mark[pc] == self.gen) continue;
+            self.mark[pc] = self.gen;
+            const st = nfa.states.items[pc];
+            switch (st.kind) {
+                .jump => try self.stack.append(a, .{ .pc = st.out }),
+                .split => {
+                    try self.stack.append(a, .{ .pc = st.out1 });
+                    try self.stack.append(a, .{ .pc = st.out });
+                },
+                .save => {
+                    if (st.arg < self.ncap) {
+                        try self.stack.append(a, .{ .pc = 0, .restore_slot = st.arg, .restore_val = self.cur[st.arg] });
+                        self.cur[st.arg] = pos;
+                    }
+                    try self.stack.append(a, .{ .pc = st.out });
+                },
+                .assert => if (self.holds(@enumFromInt(st.arg), hay, pos)) try self.stack.append(a, .{ .pc = st.out }),
+                .byteset, .match => {
+                    if (to_next) {
+                        self.nl_pc[self.nl_n] = pc;
+                        @memcpy(self.nl_caps[self.nl_n * self.ncap ..][0..self.ncap], self.cur[0..self.ncap]);
+                        self.nl_n += 1;
+                    } else {
+                        self.cl_pc[self.cl_n] = pc;
+                        @memcpy(self.cl_caps[self.cl_n * self.ncap ..][0..self.ncap], self.cur[0..self.ncap]);
+                        self.cl_n += 1;
+                    }
+                },
+            }
+        }
+    }
+
+    fn seed(self: *Vm, hay: []const u8, i: usize) !void {
+        @memset(self.cur[0..self.ncap], none);
+        self.cur[0] = i;
+        try self.add(false, self.re.nfa.start, hay, i);
+    }
+
+    fn search(self: *Vm, hay: []const u8, from: usize, out: []usize) !bool {
+        const nfa = &self.re.nfa;
+        var matched = false;
+        var i = from;
+        self.cl_n = 0;
+        self.nextGen();
+        try self.seed(hay, i);
+        while (true) {
+            if (self.cl_n == 0) {
+                if (matched or i >= hay.len) break;
+                i += 1;
+                self.nextGen();
+                try self.seed(hay, i);
+                continue;
+            }
+            self.nl_n = 0;
+            self.nextGen();
+            var k: usize = 0;
+            while (k < self.cl_n) : (k += 1) {
+                const pc = self.cl_pc[k];
+                const st = nfa.states.items[pc];
+                switch (st.kind) {
+                    .match => {
+                        const n = @min(out.len, self.ncap);
+                        @memcpy(out[0..n], self.cl_caps[k * self.ncap ..][0..n]);
+                        out[1] = i;
+                        matched = true;
+                        break;
+                    },
+                    .byteset => {
+                        if (i < hay.len and nfa.sets.items[st.arg].has(hay[i])) {
+                            @memcpy(self.cur[0..self.ncap], self.cl_caps[k * self.ncap ..][0..self.ncap]);
+                            try self.add(true, st.out, hay, i + 1);
+                        }
+                    },
+                    else => {},
+                }
+            }
+            if (i >= hay.len) break;
+            i += 1;
+            std.mem.swap([]u32, &self.cl_pc, &self.nl_pc);
+            std.mem.swap([]usize, &self.cl_caps, &self.nl_caps);
+            self.cl_n = self.nl_n;
+            self.nl_n = 0;
+            if (!matched) try self.seed(hay, i);
+        }
+        return matched;
     }
 };
 
@@ -1569,6 +1763,29 @@ test "case insensitive and literals" {
     try std.testing.expect(re2.must != null);
     try std.testing.expect(re2.isMatch("xx foo yy bar"));
     try std.testing.expect(!re2.isMatch("xx bar yy foo"));
+}
+
+test "pike leftmost-first" {
+    const re = try Regex.compile(std.testing.allocator, &.{"a*(ab)?"}, .{ .syntax = .ere });
+    defer re.deinit();
+    var caps: [4]usize = undefined;
+    try std.testing.expect(re.pike("aab", 0, &caps));
+    try std.testing.expectEqual(@as(usize, 0), caps[0]);
+    try std.testing.expectEqual(@as(usize, 2), caps[1]);
+    const re2 = try Regex.compile(std.testing.allocator, &.{"(a|ab)(c|bcd)"}, .{ .syntax = .ere });
+    defer re2.deinit();
+    var c2: [6]usize = undefined;
+    try std.testing.expect(re2.pike("abcd", 0, &c2));
+    try std.testing.expectEqual(@as(usize, 0), c2[0]);
+    try std.testing.expectEqual(@as(usize, 4), c2[1]);
+    try std.testing.expectEqual(@as(usize, 0), c2[2]);
+    try std.testing.expectEqual(@as(usize, 1), c2[3]);
+    const re3 = try Regex.compile(std.testing.allocator, &.{"\\bfoo\\b"}, .{ .syntax = .ere });
+    defer re3.deinit();
+    var c3: [2]usize = undefined;
+    try std.testing.expect(re3.pike("a foo b", 0, &c3));
+    try std.testing.expectEqual(@as(usize, 2), c3[0]);
+    try std.testing.expect(!re3.pike("afoo b", 0, &c3));
 }
 
 test "unsupported and invalid" {

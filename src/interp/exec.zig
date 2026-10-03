@@ -212,7 +212,7 @@ fn run_pipeline(sh: *Shell, p: ast.Pipeline) Err!u8 {
     } else {
         status = blk: {
             if (plan.classify(sh, p) == .fused) {
-                if (try fuse.run(sh, p)) |st| break :blk st;
+                if (try fuse.run(sh, p, null)) |st| break :blk st;
             }
             break :blk try run_multi(sh, p);
         };
@@ -2002,6 +2002,7 @@ pub fn cmd_subst(sh: *Shell, cs: *const ast.CmdSubst) Err![]const u8 {
             }
         }
     }
+    if (try cmdsub_fast(sh, cs)) |r| return r;
     var fds: [2]c_int = undefined;
     if (sys.pipe(&fds) != 0) {
         sh.msg("cannot make pipe for command substitution: {s}", .{sys.msg_for(sys.errno())});
@@ -2039,6 +2040,59 @@ pub fn cmd_subst(sh: *Shell, cs: *const ast.CmdSubst) Err![]const u8 {
     _ = sys.close(fds[0]);
     sh.cmdsub_status = wait_pid(sh, pid);
     return strip_nl(buf.items);
+}
+
+const pure_builtins = [_][]const u8{ "echo", "printf", "pwd", "true", "false", ":", "test", "[" };
+
+fn cmdsub_fast(sh: *Shell, cs: *const ast.CmdSubst) Err!?[]const u8 {
+    if (cs.body.items.len != 1) return null;
+    const it = cs.body.items[0];
+    if (it.background or it.and_or.rest.len != 0) return null;
+    const p = it.and_or.first;
+    if (p.negate or p.time != .none or p.commands.len == 0) return null;
+    if (sh.opt(.xtrace) or sh.opt(.verbose) or sh.trap_debug.kind == .cmd) return null;
+    const saved_line = sh.lineno;
+    defer sh.lineno = saved_line;
+    if (p.commands.len == 1) {
+        const c = p.commands[0];
+        if (c.body != .simple) return null;
+        const s = c.body.simple;
+        if (s.assigns.len != 0 or s.words.len == 0 or c.redirs.len != 0) return null;
+        const name = plain_lit(s.words[0]) orelse return null;
+        var is_pure = false;
+        for (pure_builtins) |n| {
+            if (std.mem.eql(u8, n, name)) is_pure = true;
+        }
+        if (is_pure) {
+            if (sh.aliases.count() > 0 or sh.funcs.contains(name)) return null;
+            for (s.words) |w| if (!plan.word_pure(w)) return null;
+            var list: std.ArrayList([]const u8) = .empty;
+            sh.lineno = c.line;
+            try expand.words_fields(sh, s.words, &list);
+            if (list.items.len == 0) return null;
+            const argv = list.items;
+            if (argv.len > 1 and (std.mem.eql(u8, argv[1], "--help") or (std.mem.eql(u8, name, "printf") and std.mem.eql(u8, argv[1], "-v")))) return null;
+            const b = builtins.lookup(argv[0]) orelse return null;
+            var buf: std.ArrayList(u8) = .empty;
+            const prev = sh.capture;
+            sh.capture = &buf;
+            defer sh.capture = prev;
+            const st = b.run(sh, argv) catch |e| switch (e) {
+                error.OutOfMemory => return e,
+                else => sh.status,
+            };
+            sh.cmdsub_status = st;
+            return strip_nl(buf.items);
+        }
+    }
+    if (plan.fusable(sh, p, 1)) {
+        var buf: std.ArrayList(u8) = .empty;
+        if (try fuse.run(sh, p, &buf)) |st| {
+            sh.cmdsub_status = st;
+            return strip_nl(buf.items);
+        }
+    }
+    return null;
 }
 
 fn strip_nl(s: []const u8) []const u8 {

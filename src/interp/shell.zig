@@ -255,6 +255,7 @@ pub const Shell = struct {
     bash_command: []const u8 = "",
     last_arg_buf: []u8 = &.{},
     hash_path: []u8 = &.{},
+    capture: ?*std.ArrayList(u8) = null,
     pipestatus: [64]u8 = [_]u8{0} ** 64,
     pipestatus_len: usize = 1,
     start_wall_ns: i128 = 0,
@@ -305,7 +306,10 @@ pub const Shell = struct {
     }
 
     pub fn out(self: *Shell, bytes: []const u8) bool {
-        _ = self;
+        if (self.capture) |c| {
+            c.appendSlice(self.sa, bytes) catch return false;
+            return true;
+        }
         return sys.write_all(1, bytes);
     }
 
@@ -313,6 +317,10 @@ pub const Shell = struct {
         const m = self.scratch.mark();
         defer self.scratch.release(m);
         const s = std.fmt.allocPrint(self.sa, fmt, args) catch return false;
+        if (self.capture) |c| {
+            c.appendSlice(self.sa, s) catch return false;
+            return true;
+        }
         return sys.write_all(1, s);
     }
 

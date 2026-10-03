@@ -1,0 +1,11 @@
+echo "$(echo a | tr a b)"
+echo "$(seq 1 3 | head -n 2)"; echo "$(seq 1 3 | tail -n 1)"
+echo "$(cat < /dev/null)end"
+false | true; x=$(echo hi | cat); echo "${PIPESTATUS[*]} [$x]"
+x=$(seq 1 5 | sort -r | head -n 2); echo "[$x]"
+x=$(printf 'k=v\n' | cut -d= -f2); echo "$x"
+x=$(seq 1 3 | /bin/false); echo "rc=$? [$x]"
+set -o pipefail; x=$(seq 1 3 | /bin/false | cat); echo "rc=$? [$x]"
+x=$(seq 1 3 | wc -l); echo $((x + 1))
+x=$(cat nonexistent-file 2>&1 | head -n 1); echo "[$x]"
+x=$(head -n 2 < out.nope 2>/dev/null); echo "rc=$? [$x]"
