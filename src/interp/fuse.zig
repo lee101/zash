@@ -86,6 +86,7 @@ const RingWriter = struct {
             try self.put_all(last);
             n += last.len;
         }
+        if (self.ring.len > 0) yield(self.group);
         return n;
     }
 
