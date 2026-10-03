@@ -12,6 +12,7 @@ const arith = @import("arith.zig");
 const unparse = @import("unparse.zig");
 const strutil = @import("strutil.zig");
 const plan = @import("plan.zig");
+const fuse = @import("fuse.zig");
 const registry = @import("../utils/registry.zig");
 const common = @import("../utils/common.zig");
 const Shell = shell.Shell;
@@ -208,7 +209,12 @@ fn run_pipeline(sh: *Shell, p: ast.Pipeline) Err!u8 {
             }
         }
     } else {
-        status = try run_multi(sh, p);
+        status = blk: {
+            if (plan.classify(sh, p) == .fused) {
+                if (try fuse.run(sh, p)) |st| break :blk st;
+            }
+            break :blk try run_multi(sh, p);
+        };
         if (!p.negate) {
             sh.status = status;
             try errexit_check_t(sh, status, had_trap);
@@ -1296,6 +1302,25 @@ pub fn apply_pairs(sh: *Shell, name: []const u8, pairs: []const Pair, append: bo
     }
 }
 
+pub fn util_ok_pub(sh: *Shell, name: []const u8, redirs: []const ast.Redirect) bool {
+    return util_ok(sh, name, redirs);
+}
+
+pub fn set_pipestatus_pub(sh: *Shell, st: []const u8) void {
+    set_pipestatus(sh, st);
+}
+
+pub fn trace_argv(sh: *Shell, argv: []const []const u8) Err!void {
+    var w: std.ArrayList(u8) = .empty;
+    try ps4(sh, &w);
+    for (argv, 0..) |a, i| {
+        if (i > 0) try w.append(sh.sa, ' ');
+        try strutil.quote_xtrace_u(sh.sa, &w, a, sh.utf8);
+    }
+    try w.append(sh.sa, '\n');
+    _ = sys.write_all(2, w.items);
+}
+
 pub fn mark_final_list(sh: *Shell, l: ast.List) void {
     if (l.items.len == 0) return;
     const it = l.items[l.items.len - 1];
@@ -1454,15 +1479,23 @@ pub fn dispatch_ex(sh: *Shell, argv: []const []const u8, decl: []const DeclItem,
         sh.bmsg("builtin", "{s}: not a shell builtin", .{name});
         return 1;
     }
-    if (registry.supports(argv) and util_ok(sh, name)) {
+    if (registry.supports(argv) and util_ok(sh, name, redirs)) {
         return run_util(sh, argv, redirs);
     }
     return run_external(sh, argv, redirs, final);
 }
 
-fn util_ok(sh: *Shell, name: []const u8) bool {
+fn util_ok(sh: *Shell, name: []const u8, redirs: []const ast.Redirect) bool {
     if (std.mem.eql(u8, name, "head")) {
-        if (sys.lseek(0, 0, 1) >= 0) return false;
+        if (sys.stat_fd(0)) |st| {
+            if (st.is_reg()) return false;
+        }
+        for (redirs) |r| {
+            switch (r.op) {
+                .in, .dup_in, .read_write => if (r.fd == .none or (r.fd == .num and r.fd.num == 0)) return false,
+                else => {},
+            }
+        }
     }
     const r = resolve(sh, name, true) catch return false;
     switch (r) {
