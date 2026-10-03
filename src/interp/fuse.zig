@@ -659,8 +659,8 @@ fn poll_waiters(fibers: []Fiber, fds: []sys.PollFd) void {
 pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
     if (!supported) return null;
     const a = sh.sa;
-    const n = p.commands.len;
-    var stages = try a.alloc(Stage, n);
+    const n_real = p.commands.len;
+    var stages = try a.alloc(Stage, n_real + 1);
     var util_count: usize = 0;
     for (p.commands, 0..) |c, i| {
         const s = c.body.simple;
@@ -692,13 +692,20 @@ pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
         stages[i] = st;
     }
 
-    if (cap != null and stages[n - 1].kind != .util) return null;
+    var n = n_real;
+    if (cap != null and stages[n_real - 1].kind == .ext) {
+        const cat_fn = registry.lookup("cat") orelse return null;
+        stages[n_real] = .{ .argv = &.{"cat"}, .run_fn = cat_fn, .sh = sh, .group = undefined, .env = undefined, .cwd = undefined };
+        util_count += 1;
+        n += 1;
+    }
+    stages = stages[0..n];
 
     var group: Group = .{};
     var b: Build = .{ .sh = sh, .a = a, .group = &group };
 
     var cat_fd: c_int = -1;
-    if (n >= 2 and stages[0].kind == .util and stages[0].argv.len == 2 and std.mem.eql(u8, stages[0].argv[0], "cat") and p.commands[0].redirs.len == 0 and
+    if (n_real >= 2 and stages[0].kind == .util and stages[0].argv.len == 2 and std.mem.eql(u8, stages[0].argv[0], "cat") and p.commands[0].redirs.len == 0 and
         !has_stdin_redir(p.commands[1].redirs) and !(i_pipe_stderr(p, 0)))
     {
         const f = stages[0].argv[1];
@@ -773,7 +780,8 @@ pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
         }
     }
 
-    for (p.commands, 0..) |c, i| {
+    for (0..n) |i| {
+        const redirs: []const ast.Redirect = if (i < n_real) p.commands[i].redirs else &.{};
         var st = &stages[i];
         st.group = &group;
         st.env = &env;
@@ -794,7 +802,7 @@ pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
         if (i + 1 < n and !stages[i].elided) st.out_ring = edges[i].ring;
         var fd1: *Sink = pipe_sinks[i];
         var fd2: *Sink = if (i < p.pipe_stderr.len and p.pipe_stderr[i] and i + 1 < n) pipe_sinks[i] else stderr_default;
-        for (c.redirs) |r| {
+        for (redirs) |r| {
             const target_fd: c_int = switch (r.fd) {
                 .none => switch (r.op) {
                     .in => 0,
@@ -932,15 +940,15 @@ pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
     }
     for (b.opened.items) |fd| _ = sys.close(fd);
 
-    const sts = try a.alloc(u8, n);
+    const sts = try a.alloc(u8, n_real);
     for (stages, 0..) |*st, i| {
         if (st.kind == .ext and st.pid > 0) st.status = exec.wait_pid(sh, st.pid);
-        sts[i] = st.status;
+        if (i < n_real) sts[i] = st.status;
     }
     if (cap == null) exec.set_pipestatus_pub(sh, sts);
-    var result = sts[n - 1];
+    var result = sts[n_real - 1];
     if (sh.opt(.pipefail)) {
-        var k = n;
+        var k = n_real;
         while (k > 0) {
             k -= 1;
             if (sts[k] != 0) {
