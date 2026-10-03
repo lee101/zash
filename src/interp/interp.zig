@@ -215,7 +215,7 @@ fn run_script_inner(sh: *Shell, src: []const u8, label_prefix: []const u8) Err!u
             var aw = std.Io.Writer.Allocating.init(sh.sa);
             err.write(&aw.writer, label_prefix) catch {};
             _ = sys.write_all(2, aw.written());
-            return finish(sh, if (err.kind == .eof_matching_only) 1 else 2);
+            return finish(sh, if (err.kind == .eof_matching_only or err.in_array) 1 else 2);
         },
     }
 }

@@ -131,7 +131,7 @@ const B = struct {
 
     fn push_field(self: *B, text: []const u8) Err!void {
         const a = self.a;
-        if (self.glob_on and has_unescaped_meta(text, true)) {
+        if (self.glob_on and has_unescaped_meta(text, self.sh.shopt(.extglob))) {
             const pat = try to_pattern(a, text);
             var matches: std.ArrayList([]const u8) = .empty;
             try glob.expand(self.sh, pat, &matches);
@@ -303,7 +303,7 @@ pub fn word_fields(sh: *Shell, w: ast.Word, out: *std.ArrayList([]const u8)) Err
     if (w.parts.len == 1) {
         switch (w.parts[0]) {
             .lit => |t| {
-                if (!sh.opt(.noglob) and has_unescaped_meta(t, true)) {} else {
+                if (!sh.opt(.noglob) and has_unescaped_meta(t, sh.shopt(.extglob))) {} else {
                     try out.append(sh.sa, t);
                     return;
                 }
@@ -1197,7 +1197,7 @@ fn lessStr(_: void, x: []const u8, y: []const u8) bool {
 }
 
 fn match_opts(sh: *Shell) pattern.Opts {
-    return .{ .extglob = true, .nocase = sh.shopt(.nocasematch), .utf8 = sh.utf8 };
+    return .{ .extglob = sh.shopt(.extglob), .nocase = sh.shopt(.nocasematch), .utf8 = sh.utf8 };
 }
 
 fn bnd(sh: *Shell, s: []const u8, k: usize) bool {
@@ -1207,7 +1207,7 @@ fn bnd(sh: *Shell, s: []const u8, k: usize) bool {
 fn trim(sh: *Shell, s: []const u8, pat: []const u8, kind: ast.TrimKind) Err![]const u8 {
     const a = sh.sa;
     const o = match_opts(sh);
-    if (!pattern.has_meta(pat, true)) {
+    if (!pattern.has_meta(pat, sh.shopt(.extglob))) {
         const lit = try pattern.unescape(a, pat);
         switch (kind) {
             .prefix, .prefix_longest => return if (std.mem.startsWith(u8, s, lit)) s[lit.len..] else s,

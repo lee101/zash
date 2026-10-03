@@ -92,6 +92,8 @@ pub const ParseError = struct {
     detail: []const u8 = "",
     src_line: []const u8 = "",
 
+    in_array: bool = false,
+
     pub const Kind = enum { unexpected_token, unexpected_eof, eof_matching, eof_matching_only, eof_looking, cond_syntax, arith_for, nesting };
 
     pub fn write(self: ParseError, w: *std.Io.Writer, prefix: []const u8) std.Io.Writer.Error!void {
@@ -595,6 +597,13 @@ pub const Lexer = struct {
     }
 
     fn scan_array_elems(self: *Lexer, open: usize) Error![]const ast.ArrayElem {
+        return self.scan_array_elems_inner(open) catch |e| {
+            if (self.err) |*er| er.in_array = true;
+            return e;
+        };
+    }
+
+    fn scan_array_elems_inner(self: *Lexer, open: usize) Error![]const ast.ArrayElem {
         var elems: std.ArrayList(ast.ArrayElem) = .empty;
         while (true) {
             while (self.pos < self.src.len) {

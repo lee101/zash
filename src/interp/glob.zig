@@ -116,7 +116,7 @@ pub fn expand(sh: *Shell, pat: []const u8, out: *std.ArrayList([]const u8)) Err!
     const trailing_slash = comps.items.len > 1 and comps.items[comps.items.len - 1].len == 0;
     var n_comps = comps.items.len;
     if (trailing_slash) n_comps -= 1;
-    const o: pattern.Opts = .{ .extglob = true, .nocase = sh.shopt(.nocaseglob), .dot_literal = !dotglob_eff(sh), .utf8 = sh.utf8 };
+    const o: pattern.Opts = .{ .extglob = sh.shopt(.extglob), .nocase = sh.shopt(.nocaseglob), .dot_literal = !dotglob_eff(sh), .utf8 = sh.utf8 };
     var ci: usize = first;
     while (ci < n_comps) : (ci += 1) {
         const comp = comps.items[ci];
@@ -139,7 +139,7 @@ pub fn expand(sh: *Shell, pat: []const u8, out: *std.ArrayList([]const u8)) Err!
                 }
                 continue;
             }
-            if (!pattern.has_meta(comp, true)) {
+            if (!pattern.has_meta(comp, sh.shopt(.extglob))) {
                 const lit = try pattern.unescape(a, comp);
                 const cand = try join(a, base, lit);
                 if (is_last) {

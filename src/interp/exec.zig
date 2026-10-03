@@ -848,7 +848,7 @@ fn run_case(sh: *Shell, cs: ast.Case) Err!u8 {
         _ = sys.write_all(2, w.items);
     }
     const word = try expand.word_string(sh, cs.word);
-    const o: @import("pattern.zig").Opts = .{ .extglob = true, .nocase = sh.shopt(.nocasematch), .utf8 = sh.utf8 };
+    const o: @import("pattern.zig").Opts = .{ .extglob = sh.shopt(.extglob), .nocase = sh.shopt(.nocasematch), .utf8 = sh.utf8 };
     var status: u8 = 0;
     var i: usize = 0;
     var fall = false;
