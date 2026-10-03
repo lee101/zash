@@ -13,7 +13,9 @@ const Shell = shell.Shell;
 const Err = shell.Err;
 const Io = std.Io;
 
-pub const supported = builtin.os.tag == .linux and (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64);
+const use_asm = builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64;
+
+pub const supported = builtin.os.tag == .linux and (builtin.cpu.arch == .x86_64 or (builtin.cpu.arch == .aarch64 and builtin.abi.isGnu()));
 
 const UContext = extern struct {
     flags: usize,
@@ -24,22 +26,112 @@ const UContext = extern struct {
     rest: [4096]u8 align(16),
 };
 
-extern "c" fn getcontext(uc: *UContext) c_int;
-extern "c" fn makecontext(uc: *UContext, func: *const fn () callconv(.c) void, argc: c_int, ...) void;
-extern "c" fn swapcontext(old: *UContext, new: *const UContext) c_int;
+const uc = if (use_asm) struct {} else struct {
+    extern "c" fn getcontext(uc: *UContext) c_int;
+    extern "c" fn makecontext(uc: *UContext, func: *const fn () callconv(.c) void, argc: c_int, ...) void;
+    extern "c" fn swapcontext(old: *UContext, new: *const UContext) c_int;
+};
+
+const Ctx = if (use_asm) struct { sp: usize = 0 } else UContext;
+
+fn ctx_switch_asm() callconv(.naked) void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\pushq %%rbp
+            \\pushq %%rbx
+            \\pushq %%r12
+            \\pushq %%r13
+            \\pushq %%r14
+            \\pushq %%r15
+            \\movq %%rsp, (%%rdi)
+            \\movq (%%rsi), %%rsp
+            \\popq %%r15
+            \\popq %%r14
+            \\popq %%r13
+            \\popq %%r12
+            \\popq %%rbx
+            \\popq %%rbp
+            \\retq
+        ),
+        .aarch64 => asm volatile (
+            \\sub sp, sp, #176
+            \\stp x19, x20, [sp, #0]
+            \\stp x21, x22, [sp, #16]
+            \\stp x23, x24, [sp, #32]
+            \\stp x25, x26, [sp, #48]
+            \\stp x27, x28, [sp, #64]
+            \\stp x29, x30, [sp, #80]
+            \\stp d8, d9, [sp, #96]
+            \\stp d10, d11, [sp, #112]
+            \\stp d12, d13, [sp, #128]
+            \\stp d14, d15, [sp, #144]
+            \\mov x2, sp
+            \\str x2, [x0]
+            \\ldr x2, [x1]
+            \\mov sp, x2
+            \\ldp x19, x20, [sp, #0]
+            \\ldp x21, x22, [sp, #16]
+            \\ldp x23, x24, [sp, #32]
+            \\ldp x25, x26, [sp, #48]
+            \\ldp x27, x28, [sp, #64]
+            \\ldp x29, x30, [sp, #80]
+            \\ldp d8, d9, [sp, #96]
+            \\ldp d10, d11, [sp, #112]
+            \\ldp d12, d13, [sp, #128]
+            \\ldp d14, d15, [sp, #144]
+            \\add sp, sp, #176
+            \\ret
+        ),
+        else => unreachable,
+    }
+}
+
+const SwitchFn = *const fn (*usize, *const usize) callconv(.c) void;
+
+fn ctx_switch(from: *Ctx, to: *Ctx) void {
+    if (use_asm) @as(SwitchFn, @ptrCast(&ctx_switch_asm))(&from.sp, &to.sp) else _ = uc.swapcontext(from, to);
+}
+
+fn ctx_init(c: *Ctx, stack: []u8, entry: *const fn () callconv(.c) void) void {
+    if (use_asm) {
+        const top = std.mem.alignBackward(usize, @intFromPtr(stack.ptr) + stack.len, 16);
+        switch (builtin.cpu.arch) {
+            .x86_64 => {
+                const frame: [*]usize = @ptrFromInt(top - 64);
+                @memset(frame[0..6], 0);
+                frame[6] = @intFromPtr(entry);
+                frame[7] = 0;
+                c.sp = top - 64;
+            },
+            .aarch64 => {
+                const frame: [*]usize = @ptrFromInt(top - 176);
+                @memset(frame[0..22], 0);
+                frame[11] = @intFromPtr(entry);
+                c.sp = top - 176;
+            },
+            else => unreachable,
+        }
+    } else {
+        _ = uc.getcontext(c);
+        c.ss_sp = stack.ptr;
+        c.ss_size = stack.len;
+        c.link = null;
+        uc.makecontext(c, entry, 0);
+    }
+}
 
 const stack_size: usize = 1 << 20;
 const ring_size: usize = 64 * 1024;
 
 const Group = struct {
-    main_ctx: UContext = undefined,
+    main_ctx: Ctx = undefined,
     running: ?*Fiber = null,
     progress: u64 = 0,
     aborted: bool = false,
 };
 
 const Fiber = struct {
-    ctx: UContext = undefined,
+    ctx: Ctx = undefined,
     stack: []u8 = &.{},
     done: bool = false,
     group: *Group,
@@ -78,7 +170,7 @@ var active_group: ?*Group = null;
 
 fn yield(g: *Group) void {
     const f = g.running.?;
-    _ = swapcontext(&f.ctx, &g.main_ctx);
+    ctx_switch(&f.ctx, &g.main_ctx);
 }
 
 fn fiber_entry() callconv(.c) void {
@@ -86,6 +178,7 @@ fn fiber_entry() callconv(.c) void {
     const f = g.running.?;
     stage_main(f.stage);
     f.done = true;
+    while (true) yield(g);
 }
 
 const Ring = struct {
@@ -786,11 +879,7 @@ pub fn run(sh: *Shell, p: ast.Pipeline) Err!?u8 {
             fi += 1;
             f.* = .{ .group = &group, .stage = st };
             f.stack = try stack_get(sh);
-            _ = getcontext(&f.ctx);
-            f.ctx.ss_sp = f.stack.ptr;
-            f.ctx.ss_size = f.stack.len;
-            f.ctx.link = &group.main_ctx;
-            makecontext(&f.ctx, &fiber_entry, 0);
+            ctx_init(&f.ctx, f.stack, &fiber_entry);
         }
         defer for (fibers) |f| stack_put(sh, f.stack);
         const pfds = try a.alloc(sys.PollFd, util_count);
@@ -812,7 +901,7 @@ pub fn run(sh: *Shell, p: ast.Pipeline) Err!?u8 {
                 alive = true;
                 const mark = group.progress;
                 group.running = f;
-                _ = swapcontext(&group.main_ctx, &f.ctx);
+                ctx_switch(&group.main_ctx, &f.ctx);
                 group.running = null;
                 if (f.done or group.progress != mark) progressed = true;
                 if (!f.done and f.wait_fd >= 0) waiting = true;

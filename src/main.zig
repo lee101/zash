@@ -22,11 +22,25 @@ fn read_all_fd(a: std.mem.Allocator, fd: c_int) ![]u8 {
     return buf.items;
 }
 
-pub fn main(init: std.process.Init.Minimal) u8 {
+extern var environ: [*:null]?[*:0]u8;
+
+comptime {
+    if (!@import("builtin").is_test) @export(&main, .{ .name = "main" });
+}
+
+pub fn main(argc: c_int, argv: [*][*:0]u8) callconv(.c) c_int {
+    var n: usize = 0;
+    while (environ[n] != null) n += 1;
+    const env: []const ?[*:0]const u8 = @ptrCast(environ[0..n]);
+    return real_main(@intCast(argc), argv, env);
+}
+
+fn real_main(argc: usize, argv_in: [*][*:0]u8, env_ptrs_in: []const ?[*:0]const u8) u8 {
     const gpa = std.heap.c_allocator;
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const arena = arena_state.allocator();
-    const args = init.args.toSlice(arena) catch return 1;
+    const args = arena.alloc([:0]const u8, argc) catch return 1;
+    for (args, 0..) |*slot, k| slot.* = std.mem.span(argv_in[k]);
     const io = std.Io.Threaded.global_single_threaded.io();
     const sh = interp.Shell.init(gpa, io) catch return 1;
 
@@ -90,8 +104,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     }
     const rest = args[i..];
 
-    var env_ptrs: []const ?[*:0]const u8 = &.{};
-    env_ptrs = init.environ.block.slice;
+    const env_ptrs = env_ptrs_in;
 
     var script_name: []const u8 = "zash";
     var pos_args: []const [:0]const u8 = rest;

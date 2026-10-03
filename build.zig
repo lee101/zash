@@ -12,6 +12,14 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const exe_lib = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .single_threaded = true,
+    });
+
     const bench_lib = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -26,7 +34,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "zash", .module = lib_mod }},
+            .single_threaded = true,
+            .imports = &.{.{ .name = "zash", .module = exe_lib }},
         }),
     });
     b.installArtifact(exe);
