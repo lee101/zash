@@ -501,15 +501,15 @@ pub const Shell = struct {
 
     fn apply_case(self: *Shell, v: *const Var, s: []const u8) Err![]const u8 {
         if (!(v.flags.lower or v.flags.upper or v.flags.capital)) return s;
-        const out_s = try self.sa.dupe(u8, s);
-        if (v.flags.lower) {
-            for (out_s) |*c| c.* = std.ascii.toLower(c.*);
-        } else if (v.flags.upper) {
-            for (out_s) |*c| c.* = std.ascii.toUpper(c.*);
-        } else if (out_s.len > 0) {
-            for (out_s, 0..) |*c, i| c.* = if (i == 0) std.ascii.toUpper(c.*) else std.ascii.toLower(c.*);
-        }
-        return out_s;
+        const strutil = @import("strutil.zig");
+        if (v.flags.lower) return strutil.case_map(self.sa, s, false, true, self.utf8, null, null);
+        if (v.flags.upper) return strutil.case_map(self.sa, s, true, true, self.utf8, null, null);
+        const first = try strutil.case_map(self.sa, s, true, false, self.utf8, null, null);
+        const l: usize = if (self.utf8 and s.len > 0) strutil.seq_len(s[0], s.len) else @min(@as(usize, 1), s.len);
+        const rest = try strutil.case_map(self.sa, s[l..], false, true, self.utf8, null, null);
+        var fl: usize = 0;
+        if (first.len > 0) fl = if (self.utf8) strutil.seq_len(first[0], first.len) else 1;
+        return std.mem.concat(self.sa, u8, &.{ first[0..fl], rest });
     }
 
     pub fn readonly_err(self: *Shell, name: []const u8) Err {

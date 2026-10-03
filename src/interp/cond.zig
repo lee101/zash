@@ -233,7 +233,7 @@ fn eval_p(sh: *Shell, c: *const ast.Cond, prefix: []const u8) CondErr!bool {
                         try pat_display(sh, &t, try expand.word_pattern_trace(sh, b.rhs));
                         try tr_emit(sh, prefix, t.items);
                     }
-                    const m = pattern.match(sh.sa, pat, l, .{ .extglob = true, .nocase = sh.shopt(.nocasematch) });
+                    const m = pattern.match(sh.sa, pat, l, .{ .extglob = true, .nocase = sh.shopt(.nocasematch), .utf8 = sh.utf8 });
                     return if (b.op == .ne) !m else m;
                 },
                 .match => {

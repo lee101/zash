@@ -841,7 +841,7 @@ fn run_case(sh: *Shell, cs: ast.Case) Err!u8 {
         _ = sys.write_all(2, w.items);
     }
     const word = try expand.word_string(sh, cs.word);
-    const o: @import("pattern.zig").Opts = .{ .extglob = true, .nocase = sh.shopt(.nocasematch) };
+    const o: @import("pattern.zig").Opts = .{ .extglob = true, .nocase = sh.shopt(.nocasematch), .utf8 = sh.utf8 };
     var status: u8 = 0;
     var i: usize = 0;
     var fall = false;
@@ -1461,11 +1461,14 @@ pub fn dispatch_ex(sh: *Shell, argv: []const []const u8, decl: []const DeclItem,
 }
 
 fn util_ok(sh: *Shell, name: []const u8) bool {
-    _ = sh;
     if (std.mem.eql(u8, name, "head")) {
         if (sys.lseek(0, 0, 1) >= 0) return false;
     }
-    return true;
+    const r = resolve(sh, name, true) catch return false;
+    switch (r) {
+        .found => |p| return std.mem.startsWith(u8, p, "/usr/bin/") or std.mem.startsWith(u8, p, "/bin/"),
+        else => return false,
+    }
 }
 
 fn import_function(sh: *Shell, name: []const u8) Err!void {

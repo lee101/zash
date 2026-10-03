@@ -249,3 +249,71 @@ pub fn ansi_escape(a: Allocator, out: *std.ArrayList(u8), s: []const u8, i_in: u
     }
     return .{ .consumed = i - i_in };
 }
+
+pub fn cp_upper(cp: u32) u32 {
+    if (cp < 0x80) return if (cp >= 'a' and cp <= 'z') cp - 32 else cp;
+    if (cp == 0xb5) return 0x39c;
+    if (cp >= 0xe0 and cp <= 0xfe and cp != 0xf7) return cp - 32;
+    if (cp == 0xff) return 0x178;
+    if (cp >= 0x100 and cp <= 0x17f) {
+        if ((cp >= 0x139 and cp <= 0x148) or (cp >= 0x179 and cp <= 0x17e)) return if (cp & 1 == 0) cp - 1 else cp;
+        if (cp == 0x131) return 'I';
+        if (cp == 0x17f) return 'S';
+        return if (cp & 1 == 1 and cp != 0x138 and cp != 0x149) cp - 1 else cp;
+    }
+    if (cp >= 0x3b1 and cp <= 0x3c9 and cp != 0x3c2) return cp - 32;
+    if (cp == 0x3c2) return 0x3a3;
+    if (cp >= 0x3ac and cp <= 0x3af) return switch (cp) {
+        0x3ac => 0x386,
+        0x3ad => 0x388,
+        0x3ae => 0x389,
+        else => 0x38a,
+    };
+    if (cp >= 0x430 and cp <= 0x44f) return cp - 32;
+    if (cp >= 0x450 and cp <= 0x45f) return cp - 80;
+    if (cp >= 0x561 and cp <= 0x586) return cp - 48;
+    return cp;
+}
+
+pub fn cp_lower(cp: u32) u32 {
+    if (cp < 0x80) return if (cp >= 'A' and cp <= 'Z') cp + 32 else cp;
+    if (cp >= 0xc0 and cp <= 0xde and cp != 0xd7) return cp + 32;
+    if (cp == 0x178) return 0xff;
+    if (cp >= 0x100 and cp <= 0x17f) {
+        if ((cp >= 0x139 and cp <= 0x148) or (cp >= 0x179 and cp <= 0x17e)) return if (cp & 1 == 1) cp + 1 else cp;
+        if (cp == 0x130) return 'i';
+        return if (cp & 1 == 0 and cp != 0x138) cp + 1 else cp;
+    }
+    if (cp >= 0x391 and cp <= 0x3a9 and cp != 0x3a2) return cp + 32;
+    if (cp >= 0x410 and cp <= 0x42f) return cp + 32;
+    if (cp >= 0x400 and cp <= 0x40f) return cp + 80;
+    if (cp >= 0x531 and cp <= 0x556) return cp + 48;
+    return cp;
+}
+
+pub fn case_map(a: Allocator, s: []const u8, upper: bool, all: bool, utf8: bool, filter: ?*const fn (ctx: ?*anyopaque, ch: []const u8) bool, ctx: ?*anyopaque) Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    var first = true;
+    while (i < s.len) {
+        const l: usize = if (utf8) seq_len(s[i], s.len - i) else 1;
+        const ch = s[i .. i + l];
+        var apply = all or first;
+        if (apply and filter != null) apply = filter.?(ctx, ch);
+        first = false;
+        if (apply) {
+            if (l == 1) {
+                try out.append(a, if (upper) std.ascii.toUpper(ch[0]) else std.ascii.toLower(ch[0]));
+            } else if (std.unicode.utf8Decode(ch)) |cp| {
+                const m = if (upper) cp_upper(cp) else cp_lower(cp);
+                try put_utf8(a, &out, m);
+            } else |_| try out.appendSlice(a, ch);
+        } else try out.appendSlice(a, ch);
+        i += l;
+        if (!all and !first and i < s.len) {
+            try out.appendSlice(a, s[i..]);
+            break;
+        }
+    }
+    return out.items;
+}

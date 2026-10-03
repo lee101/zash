@@ -144,13 +144,9 @@ fn pad_str(st: *State, spec: Spec, width: ?usize, prec: ?usize, s_in: []const u8
     const a = st.sh.sa;
     var s = s_in;
     if (prec) |p| {
-        if (p < s.len) {
-            var cut = p;
-            if (st.sh.utf8) cut = strutil.char_offset(true, s, p);
-            s = s[0..cut];
-        }
+        if (p < s.len) s = s[0..p];
     }
-    const len = strutil.char_len(st.sh.utf8, s);
+    const len = s.len;
     const w = width orelse 0;
     const left = std.mem.findScalar(u8, spec.flags[0..spec.nflags], '-') != null;
     if (!left and w > len) try st.out.appendNTimes(a, ' ', w - len);
@@ -297,8 +293,7 @@ fn run_format(st: *State, fmt: []const u8) !void {
                 if (arg.len == 0) {
                     try pad_str(st, spec, width, null, "");
                 } else {
-                    const l = if (st.sh.utf8) strutil.seq_len(arg[0], arg.len) else 1;
-                    try pad_str(st, spec, width, null, arg[0..l]);
+                    try pad_str(st, spec, width, null, arg[0..1]);
                 }
             },
             's' => {

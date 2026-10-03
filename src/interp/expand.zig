@@ -1110,7 +1110,11 @@ fn lessStr(_: void, x: []const u8, y: []const u8) bool {
 }
 
 fn match_opts(sh: *Shell) pattern.Opts {
-    return .{ .extglob = sh.shopt(.extglob) or true, .nocase = sh.shopt(.nocasematch) };
+    return .{ .extglob = true, .nocase = sh.shopt(.nocasematch), .utf8 = sh.utf8 };
+}
+
+fn bnd(sh: *Shell, s: []const u8, k: usize) bool {
+    return !sh.utf8 or k >= s.len or (s[k] & 0xC0) != 0x80;
 }
 
 fn trim(sh: *Shell, s: []const u8, pat: []const u8, kind: ast.TrimKind) Err![]const u8 {
@@ -1127,6 +1131,7 @@ fn trim(sh: *Shell, s: []const u8, pat: []const u8, kind: ast.TrimKind) Err![]co
         .prefix => {
             var k: usize = 0;
             while (k <= s.len) : (k += 1) {
+                if (!bnd(sh, s, k)) continue;
                 if (pattern.match(a, pat, s[0..k], o)) return s[k..];
             }
         },
@@ -1134,6 +1139,7 @@ fn trim(sh: *Shell, s: []const u8, pat: []const u8, kind: ast.TrimKind) Err![]co
             var k: usize = s.len + 1;
             while (k > 0) {
                 k -= 1;
+                if (!bnd(sh, s, k)) continue;
                 if (pattern.match(a, pat, s[0..k], o)) return s[k..];
             }
         },
@@ -1141,12 +1147,14 @@ fn trim(sh: *Shell, s: []const u8, pat: []const u8, kind: ast.TrimKind) Err![]co
             var k: usize = s.len + 1;
             while (k > 0) {
                 k -= 1;
+                if (!bnd(sh, s, k)) continue;
                 if (pattern.match(a, pat, s[k..], o)) return s[0..k];
             }
         },
         .suffix_longest => {
             var k: usize = 0;
             while (k <= s.len) : (k += 1) {
+                if (!bnd(sh, s, k)) continue;
                 if (pattern.match(a, pat, s[k..], o)) return s[0..k];
             }
         },
@@ -1180,6 +1188,7 @@ fn replace(sh: *Shell, s: []const u8, pat: []const u8, rep: []const u8, kind: as
             var k: usize = s.len + 1;
             while (k > 0) {
                 k -= 1;
+                if (!bnd(sh, s, k)) continue;
                 if (pattern.match(a, pat, s[0..k], o)) {
                     try out.appendSlice(a, rep);
                     try out.appendSlice(a, s[k..]);
@@ -1199,6 +1208,7 @@ fn replace(sh: *Shell, s: []const u8, pat: []const u8, rep: []const u8, kind: as
             }
             var k: usize = 0;
             while (k <= s.len) : (k += 1) {
+                if (!bnd(sh, s, k)) continue;
                 if (pattern.match(a, pat, s[k..], o)) {
                     try out.appendSlice(a, s[0..k]);
                     try out.appendSlice(a, rep);
@@ -1215,10 +1225,11 @@ fn replace(sh: *Shell, s: []const u8, pat: []const u8, rep: []const u8, kind: as
                 var mlen: ?usize = null;
                 if (literal) {
                     if (std.mem.startsWith(u8, s[i..], lit)) mlen = lit.len;
-                } else {
+                } else if (bnd(sh, s, i)) {
                     var k: usize = s.len + 1;
                     while (k > i) {
                         k -= 1;
+                        if (!bnd(sh, s, k)) continue;
                         if (pattern.match(a, pat, s[i..k], o)) {
                             mlen = k - i;
                             break;
@@ -1248,21 +1259,19 @@ fn replace(sh: *Shell, s: []const u8, pat: []const u8, rep: []const u8, kind: as
     }
 }
 
+const CaseCtx = struct { sh: *Shell, pat: []const u8 };
+
+fn case_filter(ctx: ?*anyopaque, ch: []const u8) bool {
+    const c: *CaseCtx = @ptrCast(@alignCast(ctx.?));
+    return pattern.match(c.sh.sa, c.pat, ch, match_opts(c.sh));
+}
+
 fn case_mod(sh: *Shell, s: []const u8, upper: bool, all: bool, pat: ?[]const u8) Err![]const u8 {
-    const a = sh.sa;
-    var out = try a.dupe(u8, s);
-    var i: usize = 0;
-    while (i < out.len) : (i += 1) {
-        const c = out[i];
-        var ok = true;
-        if (pat) |p| {
-            var one = [_]u8{c};
-            ok = pattern.match(a, p, &one, match_opts(sh));
-        }
-        if (ok) out[i] = if (upper) std.ascii.toUpper(c) else std.ascii.toLower(c);
-        if (!all) break;
+    if (pat) |p| {
+        var cc: CaseCtx = .{ .sh = sh, .pat = p };
+        return strutil.case_map(sh.sa, s, upper, all, sh.utf8, case_filter, &cc);
     }
-    return out;
+    return strutil.case_map(sh.sa, s, upper, all, sh.utf8, null, null);
 }
 
 fn substring(sh: *Shell, s: []const u8, off_in: i64, len_in: ?i64) ?[]const u8 {
@@ -1370,16 +1379,9 @@ fn transform(sh: *Shell, c: u8, s: []const u8, name: []const u8, has_sub: bool) 
                 }
             }
         },
-        'U' => {
-            for (s) |ch| try out.append(a, std.ascii.toUpper(ch));
-        },
-        'L' => {
-            for (s) |ch| try out.append(a, std.ascii.toLower(ch));
-        },
-        'u' => {
-            try out.appendSlice(a, s);
-            if (out.items.len > 0) out.items[0] = std.ascii.toUpper(out.items[0]);
-        },
+        'U' => try out.appendSlice(a, try strutil.case_map(a, s, true, true, sh.utf8, null, null)),
+        'L' => try out.appendSlice(a, try strutil.case_map(a, s, false, true, sh.utf8, null, null)),
+        'u' => try out.appendSlice(a, try strutil.case_map(a, s, true, false, sh.utf8, null, null)),
         'P' => try out.appendSlice(a, s),
         'a' => {
             if (sh.find(name)) |v| {

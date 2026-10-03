@@ -5,7 +5,28 @@ pub const Opts = struct {
     extglob: bool = true,
     nocase: bool = false,
     dot_literal: bool = false,
+    utf8: bool = false,
 };
+
+const strutil = @import("strutil.zig");
+
+const Cp = struct { cp: u32, len: usize };
+
+fn next_cp(s: []const u8, i: usize, utf8: bool) Cp {
+    const c = s[i];
+    if (!utf8 or c < 0x80) return .{ .cp = c, .len = 1 };
+    const l = strutil.seq_len(c, s.len - i);
+    const cp = std.unicode.utf8Decode(s[i .. i + l]) catch return .{ .cp = c, .len = 1 };
+    return .{ .cp = cp, .len = l };
+}
+
+fn class_match_cp(name: []const u8, cp: u32) bool {
+    if (cp < 0x80) return class_match(name, @intCast(cp));
+    if (std.mem.eql(u8, name, "alpha") or std.mem.eql(u8, name, "alnum") or std.mem.eql(u8, name, "graph") or std.mem.eql(u8, name, "print") or std.mem.eql(u8, name, "word")) return cp >= 0xa1;
+    if (std.mem.eql(u8, name, "upper")) return strutil.cp_lower(cp) != cp;
+    if (std.mem.eql(u8, name, "lower")) return strutil.cp_upper(cp) != cp;
+    return false;
+}
 
 pub fn is_meta_char(c: u8) bool {
     return switch (c) {
@@ -107,7 +128,7 @@ fn class_match(name: []const u8, c: u8) bool {
     return false;
 }
 
-fn bracket_match(p: []const u8, open: usize, close: usize, c: u8, nocase: bool) bool {
+fn bracket_match(p: []const u8, open: usize, close: usize, c: u32, nocase: bool, utf8: bool) bool {
     var i = open + 1;
     var neg = false;
     if (i < close and (p[i] == '!' or p[i] == '^')) {
@@ -115,9 +136,9 @@ fn bracket_match(p: []const u8, open: usize, close: usize, c: u8, nocase: bool) 
         i += 1;
     }
     var matched = false;
+    const cl = if (nocase) strutil.cp_lower(c) else c;
     while (i < close) {
-        var lo = p[i];
-        if (lo == '[' and i + 1 < close and (p[i + 1] == ':' or p[i + 1] == '=' or p[i + 1] == '.')) {
+        if (p[i] == '[' and i + 1 < close and (p[i + 1] == ':' or p[i + 1] == '=' or p[i + 1] == '.')) {
             const d = p[i + 1];
             var j = i + 2;
             while (j + 1 < close + 1) : (j += 1) {
@@ -128,32 +149,29 @@ fn bracket_match(p: []const u8, open: usize, close: usize, c: u8, nocase: bool) 
             if (j + 1 <= close) {
                 const name = p[i + 2 .. j];
                 if (d == ':') {
-                    if (class_match(name, c)) matched = true;
-                } else if (name.len == 1 and name[0] == c) matched = true;
+                    if (class_match_cp(name, c)) matched = true;
+                } else if (name.len >= 1) {
+                    const nc = next_cp(name, 0, utf8);
+                    if (nc.len == name.len and nc.cp == c) matched = true;
+                }
                 i = j + 2;
                 continue;
             }
         }
-        if (lo == '\\' and i + 1 < close) {
-            i += 1;
-            lo = p[i];
-        }
-        i += 1;
+        if (p[i] == '\\' and i + 1 < close) i += 1;
+        const lo = next_cp(p, i, utf8);
+        i += lo.len;
         if (i + 1 < close and p[i] == '-') {
-            var hi = p[i + 1];
-            var adv: usize = 2;
-            if (hi == '\\' and i + 2 < close) {
-                hi = p[i + 2];
-                adv = 3;
-            }
-            i += adv;
+            var hi_i = i + 1;
+            if (p[hi_i] == '\\' and hi_i + 1 < close) hi_i += 1;
+            const hi = next_cp(p, hi_i, utf8);
+            i = hi_i + hi.len;
             if (nocase) {
-                const lc = lower(c);
-                const uc = std.ascii.toUpper(c);
-                if ((c >= lo and c <= hi) or (lc >= lo and lc <= hi) or (uc >= lo and uc <= hi)) matched = true;
-            } else if (c >= lo and c <= hi) matched = true;
+                const cu = strutil.cp_upper(c);
+                if ((c >= lo.cp and c <= hi.cp) or (cl >= lo.cp and cl <= hi.cp) or (cu >= lo.cp and cu <= hi.cp)) matched = true;
+            } else if (c >= lo.cp and c <= hi.cp) matched = true;
         } else {
-            if (lo == c or (nocase and lower(lo) == lower(c))) matched = true;
+            if (lo.cp == c or (nocase and strutil.cp_lower(lo.cp) == cl)) matched = true;
         }
     }
     return matched != neg;
@@ -221,14 +239,15 @@ pub const Matcher = struct {
                     switch (c) {
                         '?' => {
                             pi += 1;
-                            ti += 1;
+                            ti += next_cp(t, ti, self.o.utf8).len;
                             advanced = true;
                         },
                         '[' => {
                             if (bracket_end(p, pi)) |ce| {
-                                if (bracket_match(p, pi, ce, tc, self.o.nocase)) {
+                                const tcp = next_cp(t, ti, self.o.utf8);
+                                if (bracket_match(p, pi, ce, tcp.cp, self.o.nocase, self.o.utf8)) {
                                     pi = ce + 1;
-                                    ti += 1;
+                                    ti += tcp.len;
                                     advanced = true;
                                 }
                             } else if (tc == '[') {
@@ -257,7 +276,7 @@ pub const Matcher = struct {
             } else if (ti == t.len) return true;
             if (advanced) continue;
             if (star_p) |sp| {
-                star_t += 1;
+                star_t += if (star_t < t.len) next_cp(t, star_t, self.o.utf8).len else 1;
                 if (star_t > t.len) return false;
                 pi = sp;
                 ti = star_t;

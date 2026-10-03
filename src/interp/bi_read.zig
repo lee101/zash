@@ -266,6 +266,14 @@ pub fn run_read(sh: *Shell, argv: []const []const u8) Err!u8 {
         }
         try text.append(a, b);
         try esc.append(a, false);
+        if (sh.utf8 and b >= 0xc0) {
+            var need = strutil.seq_len(b, 4) - 1;
+            while (need > 0) : (need -= 1) {
+                const cb = src.next() orelse break;
+                try text.append(a, cb);
+                try esc.append(a, false);
+            }
+        }
         count += 1;
     }
     if (src.timed_out) {
