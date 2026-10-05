@@ -2,6 +2,10 @@
 
 Harness: `bench/run.sh` (agent corpus, 630 entries, hyperfine `-N`, 20 runs, 3 warmup, median), `bench/stress.sh` (200MB log). Every entry is output-checked against bash before it is timed; speedup is bash median over zash median. Build: `zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseFast` (static musl executable). Machine: 32-core Linux VM under load, so single entries under about 2ms are noisy by 10 to 20 percent; category geomeans are stable to about 2 percent.
 
+## Gate run after in-process sed, sort, uniq, ls, find and faster grep -v/-o
+
+Agent corpus: 644 entries, all output-equal, geomean 2.62x (search 1.76x, text-pipeline 3.12x, fs-listing 3.07x, control-flow 3.35x, git 1.32x, startup 3.14x). Stress corpus: 14 of 14 output-equal, geomean 5.51x. Differential suite 1342/1342. `sort` and `ls` stay in-process only under C, POSIX or C.UTF-8 collation and fall back to the real tools in other locales, so locale-default machines see the old numbers for those two.
+
 ## Agent corpus, before and after
 
 | category | entries | before geomean | after geomean | after median | zash median ms (before / after) |
