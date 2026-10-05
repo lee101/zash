@@ -794,6 +794,13 @@ const Searcher = struct {
             try self.processQuiet(data);
             return;
         }
+        if (self.cfg.invert and !self.out_quiet and !self.ctx_enabled and !self.cfg.word and !self.cfg.only and !self.max_reached and
+            !self.done_on_match and self.cfg.max_count == null and !self.cfg.line_number and !self.cfg.byte_offset and !self.with_filename and
+            !(self.utf8 and self.cfg.binary == .binary and !validUtf8(data)))
+        {
+            try self.invertBulk(data);
+            return;
+        }
         self.cursor_pos = 0;
         self.cursor_line = line0;
         self.block_line0 = line0;
@@ -818,6 +825,36 @@ const Searcher = struct {
                 try self.trailingBlock(data, pos, abs);
                 return;
             }
+        }
+    }
+
+    fn invertBulk(self: *Searcher, data: []const u8) !void {
+        var pos: usize = 0;
+        while (pos < data.len) {
+            var gap_end = data.len;
+            var next = data.len;
+            if (self.re) |r| {
+                if (r.searchBuffer(data, pos)) |q| {
+                    if (q < data.len) {
+                        const le0 = std.mem.findScalarPos(u8, data, pos, '\n') orelse data.len;
+                        if (q <= le0) {
+                            gap_end = pos;
+                            next = if (le0 < data.len) le0 + 1 else data.len;
+                        } else {
+                            gap_end = if (common.findLastByte(data[pos..q], '\n')) |i| pos + i + 1 else pos;
+                            const le = std.mem.findScalarPos(u8, data, q, '\n') orelse data.len;
+                            next = if (le < data.len) le + 1 else data.len;
+                        }
+                    }
+                }
+            }
+            if (gap_end > pos) {
+                const gap = data[pos..gap_end];
+                try common.put(self.io.out, gap);
+                self.count += common.countByte(gap, '\n');
+                self.used = true;
+            }
+            pos = next;
         }
     }
 

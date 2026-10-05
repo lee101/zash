@@ -106,6 +106,14 @@ def cases(fx):
     yield Case(["grep", "-d", "read", "foo", "rtree", "g1"])
     yield Case(["grep", "-d", "recurse", "foo", "rtree"])
     yield Case(["grep", "--directories=skip", "foo", "rtree"])
+    for pat in ["fo[o]*", "foo[a-z]*", "oo*b", "o[a-z]o", "ba[rz]*", "fo*", "ar$", "foo.*bar", "foo\\|bar", "f.o", "foo\\b"]:
+        for f in ["g2", "gtext", "mixed", "words", "gnonl", "gdense"]:
+            for o in [["-o"], ["-oi"], ["-on"], ["-ob"], ["-ow"], ["-v"], ["-vi"], ["-vx"], ["-vw"], ["-vc"], ["-v", "-A1"]]:
+                yield Case(["grep"] + o + [pat, f])
+    for pat in ["foo", "o", "^", "$", "^$", "x"]:
+        for f in ["g2", "gnonl", "empty", "nl", "blank", "crlf", "binary", "bin_nul", "badutf8", "longline"]:
+            for o in [["-v"], ["-vF"], ["-v", "-e", "bar"], ["-vc"], ["-v", "-m1"], ["-v", "-H"], ["-v", "-a"], ["-v", "-n"], ["-v", "-b"]]:
+                yield Case(["grep"] + o + [pat, f])
     # utf8
     for loc in ["C.UTF-8"]:
         env = {"LC_ALL": loc}
