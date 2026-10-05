@@ -881,6 +881,7 @@ pub const Regex = struct {
     can_be_empty: bool,
     must: ?[]const u8,
     must_icase: bool,
+    lead: []const u8,
     literal_only: ?[]const u8,
     fwd: Dfa,
     anc: Dfa,
@@ -943,6 +944,7 @@ pub const Regex = struct {
         try self.computeFirst();
         self.must = null;
         self.must_icase = false;
+        self.lead = "";
         self.literal_only = null;
         self.analyzeLiterals(ast);
         self.fwd = try Dfa.init(alloc, self, true);
@@ -1041,6 +1043,18 @@ pub const Regex = struct {
                 self.must_icase = icase;
             }
             return;
+        }
+        var ld: std.ArrayList(u8) = .empty;
+        switch (ast.*) {
+            .set => _ = pureLiteral(ast, &ld, arena, icase),
+            .cat => |items| for (items) |it| {
+                if (it.* != .set or !pureLiteral(it, &ld, arena, icase)) break;
+            },
+            else => {},
+        }
+        if (ld.items.len > 0) {
+            self.lead = ld.items;
+            self.must_icase = icase;
         }
         var best: []const u8 = "";
         var cur: std.ArrayList(u8) = .empty;
@@ -1157,6 +1171,13 @@ pub const Regex = struct {
 
     pub fn find(self: *Regex, hay: []const u8, from: usize) ?Match {
         var s = from;
+        if (self.lead.len > 0) {
+            while (true) {
+                s = self.findLit(hay, self.lead, s) orelse return null;
+                if (self.anc.longest(hay, s, null)) |e| return .{ .start = s, .end = e };
+                s += 1;
+            }
+        }
         while (s <= hay.len) : (s += 1) {
             if (!self.can_be_empty) {
                 while (s < hay.len and !self.first_bytes.has(hay[s])) s += 1;
