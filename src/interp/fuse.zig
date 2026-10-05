@@ -692,7 +692,7 @@ pub fn run(sh: *Shell, p: ast.Pipeline, cap: ?*std.ArrayList(u8)) Err!?u8 {
             continue;
         }
         if (registry.lookup(name)) |rf| {
-            if (registry.supports(list.items) and exec.util_ok_stage(sh, name, c.redirs, i == 0)) {
+            if (exec.util_supported(sh, list.items) and exec.util_ok_stage(sh, name, c.redirs, i == 0)) {
                 st.run_fn = rf;
                 util_count += 1;
             } else st.kind = .ext;
