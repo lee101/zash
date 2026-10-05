@@ -177,8 +177,32 @@ fn real_main(argc: usize, argv_in: [*][*:0]u8, env_ptrs_in: []const ?[*:0]const 
         }
     }
 
+    if (command != null) exec_fallback(arena, source, args, argv_in);
     if (interactive and command == null and script == null) return interp.run_interactive(sh);
     const prefix: []const u8 = if (command != null) (std.fmt.allocPrint(arena, "{s}: -c", .{script_name}) catch script_name) else script_name;
     const status = interp.run_script(sh, source, prefix);
     return status;
+}
+
+fn exec_fallback(arena: std.mem.Allocator, source: []const u8, args: []const [:0]const u8, argv_in: [*][*:0]u8) void {
+    var fb: ?[*:0]const u8 = null;
+    var k: usize = 0;
+    while (environ[k]) |e| : (k += 1) {
+        const s = std.mem.span(e);
+        if (std.mem.startsWith(u8, s, "ZASH_BASH_FALLBACK=") and s.len > 19) fb = e + 19;
+    }
+    const path = fb orelse return;
+    const bail = switch (zash.parser.parse(arena, source, .{})) {
+        .err => true,
+        .ok => |list| blk: {
+            for (list.items) |it| if (it.background) break :blk true;
+            break :blk false;
+        },
+    };
+    if (!bail) return;
+    const out = arena.alloc(?[*:0]const u8, args.len + 1) catch return;
+    out[0] = path;
+    for (1..args.len) |j| out[j] = argv_in[j];
+    out[args.len] = null;
+    _ = interp.sys.execve(path, @ptrCast(out.ptr), @ptrCast(environ));
 }
