@@ -22,6 +22,8 @@ pub const entries = [_]Entry{
     .{ .name = "tr", .run = @import("tr.zig").run, .supports = @import("tr.zig").supports },
     .{ .name = "grep", .run = @import("grep.zig").run, .supports = @import("grep.zig").supports, .supports_env = @import("grep.zig").supportsEnv },
     .{ .name = "tail", .run = @import("tail.zig").run, .supports = @import("tail.zig").supports },
+    .{ .name = "sort", .run = @import("sort.zig").run, .supports = @import("sort.zig").supports, .supports_env = @import("sort.zig").supportsEnv },
+    .{ .name = "uniq", .run = @import("uniq.zig").run, .supports = @import("uniq.zig").supports, .supports_env = @import("uniq.zig").supportsEnv },
 };
 
 fn find(name: []const u8) ?*const Entry {
