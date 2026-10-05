@@ -2,3 +2,4 @@
 zig-out/
 bench/private/
 *.log
+.claude
