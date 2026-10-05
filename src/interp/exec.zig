@@ -1482,13 +1482,35 @@ pub fn dispatch_ex(sh: *Shell, argv: []const []const u8, decl: []const DeclItem,
         sh.bmsg("builtin", "{s}: not a shell builtin", .{name});
         return 1;
     }
-    if (registry.supports(argv) and util_ok(sh, name, redirs)) {
+    if (util_supported(sh, argv) and util_ok(sh, name, redirs)) {
         return run_util(sh, argv, redirs);
     }
     return run_external(sh, argv, redirs, final);
 }
 
+const ExportedEnv = struct {
+    sh: *Shell,
+    fn get(c: ?*const anyopaque, key: []const u8) ?[]const u8 {
+        const self: *const @This() = @ptrCast(@alignCast(c.?));
+        const v = self.sh.find(key) orelse return null;
+        if (!v.flags.exported) return null;
+        return self.sh.scalar_of(v);
+    }
+};
+
+pub fn util_supported(sh: *Shell, argv: []const []const u8) bool {
+    if (!registry.supports(argv)) return false;
+    var ec: ExportedEnv = .{ .sh = sh };
+    const env: common.EnvView = .{ .context = &ec, .get_fn = ExportedEnv.get };
+    return registry.supportsEnv(&env, argv);
+}
+
+fn tty_blocks(name: []const u8) bool {
+    return std.mem.eql(u8, name, "ls") and sys.isatty(1) != 0;
+}
+
 pub fn util_ok_stage(sh: *Shell, name: []const u8, redirs: []const ast.Redirect, first: bool) bool {
+    if (tty_blocks(name)) return false;
     if (!first and redirs.len == 0) return util_path_ok(sh, name);
     return util_ok(sh, name, redirs);
 }
@@ -1502,6 +1524,7 @@ fn util_path_ok(sh: *Shell, name: []const u8) bool {
 }
 
 fn util_ok(sh: *Shell, name: []const u8, redirs: []const ast.Redirect) bool {
+    if (tty_blocks(name)) return false;
     if (std.mem.eql(u8, name, "head")) {
         if (sys.stat_fd(0)) |st| {
             if (st.is_reg()) return false;
